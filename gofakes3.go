@@ -41,8 +41,8 @@ type GoFakeS3 struct {
 	log                     Logger
 
 	// simple v4 signature
+	mu         sync.RWMutex // protects vAuthPair map only
 	v4AuthPair map[string]string
-	mu         sync.RWMutex
 }
 
 // New creates a new GoFakeS3 using the supplied Backend. Backends are pluggable.
@@ -120,8 +120,9 @@ func (g *GoFakeS3) DelAuthKeys(p []string) {
 func (g *GoFakeS3) authMiddleware(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, rq *http.Request) {
 		g.mu.RLock()
-		defer g.mu.RUnlock()
-		if len(g.v4AuthPair) > 0 {
+		haveAuth := len(g.v4AuthPair) > 0
+		g.mu.RUnlock()
+		if haveAuth {
 			if result := signature.V4SignVerify(rq); result != signature.ErrNone {
 				g.log.Print(LogWarn, "Access Denied:", rq.RemoteAddr, "=>", rq.URL)
 
