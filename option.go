@@ -89,3 +89,7 @@ func WithUnimplementedPageError() Option {
 func WithAutoBucket(enabled bool) Option {
 	return func(g *GoFakeS3) { g.autoBucket = true }
 }
+
+func WithBaseURL(baseURL string) Option {
+	return func(g *GoFakeS3) { g.baseURL = baseURL }
+}
