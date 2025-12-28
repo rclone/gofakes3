@@ -1,6 +1,7 @@
 package gofakes3
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -454,7 +455,7 @@ type multipartUpload struct {
 	mu sync.Mutex
 }
 
-func (mpu *multipartUpload) AddPart(partNumber int, at time.Time, body *hashingReader, size int64) (etag string, err error) {
+func (mpu *multipartUpload) AddPart(ctx context.Context, partNumber int, at time.Time, body *hashingReader, size int64) (etag string, err error) {
 	if partNumber > MaxUploadPartNumber {
 		return "", ErrInvalidPart
 	}
@@ -464,12 +465,12 @@ func (mpu *multipartUpload) AddPart(partNumber int, at time.Time, body *hashingR
 		return "", err
 	}
 
-	w := tempBlob.Writer()
+	w := tempBlob.Writer(ctx)
 	defer w.Close()
 
 	_, err = io.Copy(w, newSizeCheckerReader(body, size))
 	if err != nil {
-		tempBlob.Cleanup()
+		tempBlob.Cleanup(ctx)
 		return
 	}
 
@@ -494,7 +495,7 @@ func (mpu *multipartUpload) AddPart(partNumber int, at time.Time, body *hashingR
 	return etag, nil
 }
 
-func (mpu *multipartUpload) Reassemble(input *CompleteMultipartUploadRequest) (body *hashingReader, size int64, err error) {
+func (mpu *multipartUpload) Reassemble(ctx context.Context, input *CompleteMultipartUploadRequest) (body *hashingReader, size int64, err error) {
 	mpu.mu.Lock()
 	defer mpu.mu.Unlock()
 
@@ -527,9 +528,9 @@ func (mpu *multipartUpload) Reassemble(input *CompleteMultipartUploadRequest) (b
 	readers := make([]io.Reader, len(input.Parts))
 	for i, inPart := range input.Parts {
 		tmpBlob := mpu.parts[inPart.PartNumber].TempBlob
-		reader := tmpBlob.Reader()
+		reader := tmpBlob.Reader(ctx)
 		defer reader.Close()
-		defer tmpBlob.Cleanup()
+		defer tmpBlob.Cleanup(ctx)
 
 		readers[i] = reader
 	}

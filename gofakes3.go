@@ -953,7 +953,7 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 			return err
 		}
 
-		etag, err := upload.AddPart(int(partNumber), g.timeSource.Now(), rdr, size)
+		etag, err := upload.AddPart(r.Context(), int(partNumber), g.timeSource.Now(), rdr, size)
 		if err != nil {
 			return err
 		}
@@ -985,7 +985,7 @@ func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID Uploa
 		return err
 	}
 
-	fileBody, size, err := upload.Reassemble(&in)
+	fileBody, size, err := upload.Reassemble(r.Context(), &in)
 	if err != nil {
 		return err
 	}

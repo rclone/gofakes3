@@ -2,6 +2,7 @@ package gofakes3
 
 import (
 	"bytes"
+	"context"
 	"io"
 )
 
@@ -10,9 +11,9 @@ type TempBlobFactory interface {
 }
 
 type TempBlob interface {
-	Reader() io.ReadCloser
-	Writer() io.WriteCloser
-	Cleanup()
+	Reader(context.Context) io.ReadCloser
+	Writer(context.Context) io.WriteCloser
+	Cleanup(context.Context)
 }
 
 func newMemoryTempBlobFactory() TempBlobFactory {
@@ -33,13 +34,15 @@ type memoryTempBlob struct {
 }
 
 // Cleanup implements TempBlob.
-func (m *memoryTempBlob) Cleanup() {}
+func (m *memoryTempBlob) Cleanup(context.Context) {}
 
 // Reader implements TempBlob.
-func (m *memoryTempBlob) Reader() io.ReadCloser { return io.NopCloser(bytes.NewReader(m.buf.Bytes())) }
+func (m *memoryTempBlob) Reader(context.Context) io.ReadCloser {
+	return io.NopCloser(bytes.NewReader(m.buf.Bytes()))
+}
 
 // Writer implements TempBlob.
-func (m *memoryTempBlob) Writer() io.WriteCloser { return &nopWriteCloser{m.buf} }
+func (m *memoryTempBlob) Writer(context.Context) io.WriteCloser { return &nopWriteCloser{m.buf} }
 
 type nopWriteCloser struct {
 	io.Writer
