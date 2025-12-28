@@ -55,3 +55,30 @@ func ReadAll(r io.Reader, size int64) (b []byte, err error) {
 
 	return b, nil
 }
+
+type sizeCheckerReader struct {
+	inner    io.Reader
+	expected int64
+	read     int64
+}
+
+func newSizeCheckerReader(inner io.Reader, expected int64) *sizeCheckerReader {
+	return &sizeCheckerReader{
+		inner:    inner,
+		expected: expected,
+	}
+}
+
+func (s *sizeCheckerReader) Read(p []byte) (n int, err error) {
+	n, err = s.inner.Read(p)
+	s.read += int64(n)
+
+	if err == io.EOF && s.read != s.expected {
+		return n, ErrIncompleteBody
+	}
+	if err == io.ErrUnexpectedEOF {
+		return n, ErrIncompleteBody
+	}
+
+	return n, err
+}

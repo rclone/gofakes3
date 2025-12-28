@@ -1,9 +1,9 @@
 package gofakes3
 
 import (
-	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"math/big"
 	"net/url"
 	"strings"
@@ -154,12 +154,15 @@ type uploader struct {
 
 	buckets map[string]*bucketUploads
 	mu      sync.Mutex
+
+	tempBlobFactory TempBlobFactory
 }
 
-func newUploader() *uploader {
+func newUploader(tempBlobFactory TempBlobFactory) *uploader {
 	return &uploader{
-		buckets:  make(map[string]*bucketUploads),
-		uploadID: new(big.Int),
+		buckets:         make(map[string]*bucketUploads),
+		uploadID:        new(big.Int),
+		tempBlobFactory: tempBlobFactory,
 	}
 }
 
@@ -170,11 +173,12 @@ func (u *uploader) Begin(bucket, object string, meta map[string]string, initiate
 	u.uploadID.Add(u.uploadID, add1)
 
 	mpu := &multipartUpload{
-		ID:        UploadID(u.uploadID.String()),
-		Bucket:    bucket,
-		Object:    object,
-		Meta:      meta,
-		Initiated: initiated,
+		ID:              UploadID(u.uploadID.String()),
+		Bucket:          bucket,
+		Object:          object,
+		Meta:            meta,
+		Initiated:       initiated,
+		tempBlobFactory: u.tempBlobFactory,
 	}
 
 	// FIXME: make sure the uploader responds to DeleteBucket
@@ -221,7 +225,7 @@ func (u *uploader) ListParts(bucket, object string, uploadID UploadID, marker in
 
 		result.Parts = append(result.Parts, ListMultipartUploadPartItem{
 			ETag:         part.ETag,
-			Size:         int64(len(part.Body)),
+			Size:         part.Size,
 			PartNumber:   partNumber,
 			LastModified: part.LastModified,
 		})
@@ -420,7 +424,8 @@ func uploadListMarkerFromQuery(q url.Values) *UploadListMarker {
 type multipartUploadPart struct {
 	PartNumber   int
 	ETag         string
-	Body         []byte
+	TempBlob     TempBlob
+	Size         int64
 	LastModified ContentTime
 }
 
@@ -443,29 +448,39 @@ type multipartUpload struct {
 	// always be nil.
 	//
 	// Do not attempt to access parts without locking mu.
-	parts []*multipartUploadPart
+	parts           []*multipartUploadPart
+	tempBlobFactory TempBlobFactory
 
 	mu sync.Mutex
 }
 
-func (mpu *multipartUpload) AddPart(partNumber int, at time.Time, body []byte) (etag string, err error) {
+func (mpu *multipartUpload) AddPart(partNumber int, at time.Time, body *hashingReader, size int64) (etag string, err error) {
 	if partNumber > MaxUploadPartNumber {
 		return "", ErrInvalidPart
 	}
 
-	mpu.mu.Lock()
-	defer mpu.mu.Unlock()
+	tempBlob := mpu.tempBlobFactory.New(mpu.Bucket, mpu.Object, partNumber, size)
+	w := tempBlob.Writer()
+	defer w.Close()
+
+	_, err = io.Copy(w, newSizeCheckerReader(body, size))
+	if err != nil {
+		tempBlob.Cleanup()
+		return
+	}
 
 	// What the ETag actually is is not specified, so let's just invent any old thing
 	// from guaranteed unique input:
-	hash := md5.New()
-	hash.Write(body)
-	etag = fmt.Sprintf(`"%s"`, hex.EncodeToString(hash.Sum(nil)))
+	etag = fmt.Sprintf(`"%s"`, hex.EncodeToString(body.Sum(nil)))
+
+	mpu.mu.Lock()
+	defer mpu.mu.Unlock()
 
 	part := multipartUploadPart{
 		PartNumber:   partNumber,
-		Body:         body,
+		TempBlob:     tempBlob,
 		ETag:         etag,
+		Size:         size,
 		LastModified: NewContentTime(at),
 	}
 	if partNumber >= len(mpu.parts) {
@@ -475,7 +490,7 @@ func (mpu *multipartUpload) AddPart(partNumber int, at time.Time, body []byte) (
 	return etag, nil
 }
 
-func (mpu *multipartUpload) Reassemble(input *CompleteMultipartUploadRequest) (body []byte, etag string, err error) {
+func (mpu *multipartUpload) Reassemble(input *CompleteMultipartUploadRequest) (body *hashingReader, size int64, err error) {
 	mpu.mu.Lock()
 	defer mpu.mu.Unlock()
 
@@ -485,34 +500,38 @@ func (mpu *multipartUpload) Reassemble(input *CompleteMultipartUploadRequest) (b
 	// end up uploading more parts than you need to assemble, so it should
 	// probably just ignore that?
 	if len(input.Parts) > mpuPartsLen {
-		return nil, "", ErrInvalidPart
+		return nil, 0, ErrInvalidPart
 	}
 
 	if !input.partsAreSorted() {
-		return nil, "", ErrInvalidPartOrder
+		return nil, 0, ErrInvalidPartOrder
 	}
-
-	var size int64
 
 	for _, inPart := range input.Parts {
 		if inPart.PartNumber >= mpuPartsLen || mpu.parts[inPart.PartNumber] == nil {
-			return nil, "", ErrorMessagef(ErrInvalidPart, "unexpected part number %d in complete request", inPart.PartNumber)
+			return nil, 0, ErrorMessagef(ErrInvalidPart, "unexpected part number %d in complete request", inPart.PartNumber)
 		}
 
 		upPart := mpu.parts[inPart.PartNumber]
 		if strings.Trim(inPart.ETag, "\"") != strings.Trim(upPart.ETag, "\"") {
-			return nil, "", ErrorMessagef(ErrInvalidPart, "unexpected part etag for number %d in complete request", inPart.PartNumber)
+			return nil, 0, ErrorMessagef(ErrInvalidPart, "unexpected part etag for number %d in complete request", inPart.PartNumber)
 		}
 
-		size += int64(len(upPart.Body))
+		size += upPart.Size
 	}
 
-	body = make([]byte, 0, size)
-	for _, part := range input.Parts {
-		body = append(body, mpu.parts[part.PartNumber].Body...)
+	readers := make([]io.Reader, len(input.Parts))
+	for i, inPart := range input.Parts {
+		reader := mpu.parts[inPart.PartNumber].TempBlob.Reader()
+		defer reader.Close()
+
+		readers[i] = reader
 	}
 
-	hash := fmt.Sprintf("%x", md5.Sum(body))
+	body, err = newHashingReader(io.MultiReader(readers...), "")
+	if err != nil {
+		return nil, 0, err
+	}
 
-	return body, hash, nil
+	return body, size, nil
 }

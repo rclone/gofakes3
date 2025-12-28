@@ -1,7 +1,6 @@
 package gofakes3
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -54,7 +53,7 @@ func New(backend Backend, options ...Option) *GoFakeS3 {
 		timeSkew:          DefaultSkewLimit,
 		metadataSizeLimit: DefaultMetadataSizeLimit,
 		integrityCheck:    true,
-		uploader:          newUploader(),
+		uploader:          newUploader(newMemoryTempBlobFactory()),
 		requestID:         0,
 	}
 
@@ -940,37 +939,28 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 		rdr = r.Body
 	}
 
+	var expectedMD5Base64 string
 	if g.integrityCheck {
-		md5Base64 := r.Header.Get("Content-MD5")
-		if _, ok := r.Header[textproto.CanonicalMIMEHeaderKey("Content-MD5")]; ok && md5Base64 == "" {
+		expectedMD5Base64 = r.Header.Get("Content-MD5")
+		if _, ok := r.Header[textproto.CanonicalMIMEHeaderKey("Content-MD5")]; ok && expectedMD5Base64 == "" {
 			return ErrInvalidDigest // Satisfies s3tests
 		}
+	}
 
-		if md5Base64 != "" {
-			var err error
-			rdr, err = newHashingReader(rdr, md5Base64)
-			if err != nil {
-				return err
-			}
+	{
+		rdr, err := newHashingReader(rdr, expectedMD5Base64)
+		if err != nil {
+			return err
 		}
-	}
 
-	body, err := ReadAll(rdr, size)
-	if err != nil {
-		return err
-	}
+		etag, err := upload.AddPart(int(partNumber), g.timeSource.Now(), rdr, size)
+		if err != nil {
+			return err
+		}
 
-	if int64(len(body)) != size {
-		return ErrIncompleteBody
+		w.Header().Add("ETag", etag)
+		return nil
 	}
-
-	etag, err := upload.AddPart(int(partNumber), g.timeSource.Now(), body)
-	if err != nil {
-		return err
-	}
-
-	w.Header().Add("ETag", etag)
-	return nil
 }
 
 func (g *GoFakeS3) abortMultipartUpload(bucket, object string, uploadID UploadID, w http.ResponseWriter, r *http.Request) error {
@@ -995,12 +985,12 @@ func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID Uploa
 		return err
 	}
 
-	fileBody, etag, err := upload.Reassemble(&in)
+	fileBody, size, err := upload.Reassemble(&in)
 	if err != nil {
 		return err
 	}
 
-	result, err := g.storage.PutObject(r.Context(), bucket, object, upload.Meta, bytes.NewReader(fileBody), int64(len(fileBody)))
+	result, err := g.storage.PutObject(r.Context(), bucket, object, upload.Meta, fileBody, size)
 	if err != nil {
 		return err
 	}
@@ -1009,7 +999,7 @@ func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID Uploa
 	}
 
 	return g.xmlEncoder(w).Encode(&CompleteMultipartUploadResult{
-		ETag:   etag,
+		ETag:   fmt.Sprintf("%x", fileBody.Sum(nil)),
 		Bucket: bucket,
 		Key:    object,
 	})

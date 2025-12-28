@@ -21,12 +21,12 @@ type hashingReader struct {
 	sum      []byte
 }
 
-func newHashingReader(inner io.Reader, expectedMD5Base64 string) (*hashingReader, error) {
+func newHashingReader(inner io.Reader, optExpectedMD5Base64 string) (*hashingReader, error) {
 	var md5Bytes []byte
 	var err error
 
-	if expectedMD5Base64 != "" {
-		md5Bytes, err = base64.StdEncoding.DecodeString(expectedMD5Base64)
+	if optExpectedMD5Base64 != "" {
+		md5Bytes, err = base64.StdEncoding.DecodeString(optExpectedMD5Base64)
 		if err != nil {
 			return nil, ErrInvalidDigest
 		}
