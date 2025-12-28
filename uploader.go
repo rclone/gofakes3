@@ -526,8 +526,10 @@ func (mpu *multipartUpload) Reassemble(input *CompleteMultipartUploadRequest) (b
 
 	readers := make([]io.Reader, len(input.Parts))
 	for i, inPart := range input.Parts {
-		reader := mpu.parts[inPart.PartNumber].TempBlob.Reader()
+		tmpBlob := mpu.parts[inPart.PartNumber].TempBlob
+		reader := tmpBlob.Reader()
 		defer reader.Close()
+		defer tmpBlob.Cleanup()
 
 		readers[i] = reader
 	}
