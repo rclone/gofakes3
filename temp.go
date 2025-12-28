@@ -6,7 +6,7 @@ import (
 )
 
 type TempBlobFactory interface {
-	New(bucket, object string, partNumber int, size int64) TempBlob
+	New(bucket, object string, partNumber int, size int64, expectedMD5 []byte) TempBlob
 }
 
 type TempBlob interface {
@@ -22,7 +22,7 @@ func newMemoryTempBlobFactory() TempBlobFactory {
 type memoryTempBlobFactory struct{}
 
 // New implements TempBlobFactory.
-func (m *memoryTempBlobFactory) New(bucket, object string, partNumber int, size int64) TempBlob {
+func (m *memoryTempBlobFactory) New(bucket, object string, partNumber int, size int64, epectedMD5 []byte) TempBlob {
 	return &memoryTempBlob{
 		buf: bytes.NewBuffer(make([]byte, 0, size)),
 	}
