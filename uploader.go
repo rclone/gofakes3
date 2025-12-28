@@ -459,7 +459,11 @@ func (mpu *multipartUpload) AddPart(partNumber int, at time.Time, body *hashingR
 		return "", ErrInvalidPart
 	}
 
-	tempBlob := mpu.tempBlobFactory.New(mpu.Bucket, mpu.Object, partNumber, size, body.GetExpectedMD5())
+	tempBlob, err := mpu.tempBlobFactory.New(mpu.Bucket, mpu.Object, partNumber, size, body.GetExpectedMD5())
+	if err != nil {
+		return "", err
+	}
+
 	w := tempBlob.Writer()
 	defer w.Close()
 
