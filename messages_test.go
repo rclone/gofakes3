@@ -52,6 +52,31 @@ func TestContentTime(t *testing.T) {
 	}
 }
 
+func TestContentTimeConvertsToUTC(t *testing.T) {
+	type testMsg struct {
+		Foo  string
+		Time ContentTime
+	}
+	const expected = "" +
+		"<testMsg>" +
+		"<Foo>bar</Foo>" +
+		"<Time>2019-01-01T13:00:00Z</Time>" +
+		"</testMsg>"
+
+	cst := time.FixedZone("CST", -6*3600)
+	var v = testMsg{
+		Foo:  "bar",
+		Time: NewContentTime(time.Date(2019, 1, 1, 7, 0, 0, 0, cst)),
+	}
+	out, err := xml.Marshal(&v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != expected {
+		t.Fatalf("unexpected XML output: %s", string(out))
+	}
+}
+
 func TestContentTimeOmitEmpty(t *testing.T) {
 	type testMsg struct {
 		Foo  string
