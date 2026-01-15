@@ -39,6 +39,7 @@ type GoFakeS3 struct {
 	autoBucket              bool
 	uploader                *uploader
 	log                     Logger
+	baseURL                 string
 
 	// simple v4 signature
 	mu         sync.RWMutex // protects vAuthPair map only
@@ -56,6 +57,7 @@ func New(backend Backend, options ...Option) *GoFakeS3 {
 		integrityCheck:    true,
 		uploader:          newUploader(),
 		requestID:         0,
+		baseURL:           "",
 	}
 
 	// versioned MUST be set before options as one of the options disables it:
@@ -123,7 +125,11 @@ func (g *GoFakeS3) authMiddleware(handler http.Handler) http.Handler {
 		haveAuth := len(g.v4AuthPair) > 0
 		g.mu.RUnlock()
 		if haveAuth {
-			if result := signature.V4SignVerify(rq); result != signature.ErrNone {
+			authReq := rq
+			if g.baseURL != "" {
+				authReq.URL.Path = g.baseURL + rq.URL.Path
+			}
+			if result := signature.V4SignVerify(authReq); result != signature.ErrNone {
 				g.log.Print(LogWarn, "Access Denied:", rq.RemoteAddr, "=>", rq.URL)
 
 				resp := signature.GetAPIError(result)
