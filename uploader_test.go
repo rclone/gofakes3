@@ -7,7 +7,32 @@ import (
 	"github.com/rclone/gofakes3"
 )
 
-func TestMultipartUpload(t *testing.T) {
+func TestMultipartAllInMemory(t *testing.T) {
+	testMultipartAll(t, func() gofakes3.Uploader { return gofakes3.NewUploaderInMemory(gofakes3.NewMultipartBackendInMemory()) })
+}
+
+func testMultipartAll(t *testing.T, newUploader func() gofakes3.Uploader) {
+	t.Run("testMultipartUpload", func(t *testing.T) {
+		testMultipartUpload(t, newUploader())
+	})
+	t.Run("testAbortMultipartUpload", func(t *testing.T) {
+		testAbortMultipartUpload(t, newUploader())
+	})
+	t.Run("testListMultipartUploadsWithTheSameObjectKey", func(t *testing.T) {
+		testListMultipartUploadsWithTheSameObjectKey(t, newUploader())
+	})
+	t.Run("testListMultipartUploadsWithDifferentObjectKeys", func(t *testing.T) {
+		testListMultipartUploadsWithDifferentObjectKeys(t, newUploader())
+	})
+	t.Run("testListMultipartUploadsPrefix", func(t *testing.T) {
+		testListMultipartUploadsPrefix(t, newUploader())
+	})
+	t.Run("testListMultipartUploadParts", func(t *testing.T) {
+		testListMultipartUploadParts(t, newUploader())
+	})
+}
+
+func testMultipartUpload(t *testing.T, uploader gofakes3.Uploader) {
 	const size = defaultUploadPartSize
 
 	for _, tc := range []struct {
@@ -25,7 +50,7 @@ func TestMultipartUpload(t *testing.T) {
 		// {parts: 100, size: 10 * 1024 * 1024, last: 1},
 	} {
 		t.Run("", func(t *testing.T) {
-			ts := newTestServer(t)
+			ts := newTestServer(t, withFakerOptions(gofakes3.WithUploader(uploader)))
 			defer ts.Close()
 
 			var size int64
@@ -41,8 +66,8 @@ func TestMultipartUpload(t *testing.T) {
 	}
 }
 
-func TestAbortMultipartUpload(t *testing.T) {
-	ts := newTestServer(t)
+func testAbortMultipartUpload(t *testing.T, uploader gofakes3.Uploader) {
+	ts := newTestServer(t, withFakerOptions(gofakes3.WithUploader(uploader)))
 	defer ts.Close()
 
 	ts.createMultipartUpload(defaultBucket, "obj", nil)
@@ -52,8 +77,8 @@ func TestAbortMultipartUpload(t *testing.T) {
 	ts.assertAbortMultipartUpload(defaultBucket, "obj", "1")
 }
 
-func TestListMultipartUploadsWithTheSameObjectKey(t *testing.T) {
-	ts := newTestServer(t)
+func testListMultipartUploadsWithTheSameObjectKey(t *testing.T, uploader gofakes3.Uploader) {
+	ts := newTestServer(t, withFakerOptions(gofakes3.WithUploader(uploader)))
 	defer ts.Close()
 
 	ts.createMultipartUpload(defaultBucket, "obj", nil)
@@ -76,8 +101,8 @@ func TestListMultipartUploadsWithTheSameObjectKey(t *testing.T) {
 		Marker: "obj/2", Limit: 2, Uploads: strs("obj/2", "obj/3")})
 }
 
-func TestListMultipartUploadsWithDifferentObjectKeys(t *testing.T) {
-	ts := newTestServer(t)
+func testListMultipartUploadsWithDifferentObjectKeys(t *testing.T, uploader gofakes3.Uploader) {
+	ts := newTestServer(t, withFakerOptions(gofakes3.WithUploader(uploader)))
 	defer ts.Close()
 
 	ts.createMultipartUpload(defaultBucket, "foo", nil)
@@ -100,8 +125,8 @@ func TestListMultipartUploadsWithDifferentObjectKeys(t *testing.T) {
 		Marker: "baz/3", Limit: 2, Uploads: strs("baz/3", "foo/1")})
 }
 
-func TestListMultipartUploadsPrefix(t *testing.T) {
-	ts := newTestServer(t)
+func testListMultipartUploadsPrefix(t *testing.T, uploader gofakes3.Uploader) {
+	ts := newTestServer(t, withFakerOptions(gofakes3.WithUploader(uploader)))
 	defer ts.Close()
 
 	ts.createMultipartUpload(defaultBucket, "foo/bar", nil)
@@ -138,8 +163,8 @@ func TestListMultipartUploadsPrefix(t *testing.T) {
 	//     Uploads:  strs("foo/bar/1", "foo/bar/2")})
 }
 
-func TestListMultipartUploadParts(t *testing.T) {
-	ts := newTestServer(t)
+func testListMultipartUploadParts(t *testing.T, uploader gofakes3.Uploader) {
+	ts := newTestServer(t, withFakerOptions(gofakes3.WithUploader(uploader)))
 	defer ts.Close()
 
 	id := ts.createMultipartUpload(defaultBucket, "foo", nil)

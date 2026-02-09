@@ -14,19 +14,26 @@ import (
 //
 // If the expected hash is not empty, once the underlying reader returns EOF,
 // the hash is checked.
-type hashingReader struct {
-	inner    io.Reader
-	expected []byte
-	hash     hash.Hash
-	sum      []byte
+type HashingReader interface {
+	io.Reader
+	GetExpectedMD5() []byte
+	Sum(into []byte) []byte
 }
 
-func newHashingReader(inner io.Reader, expectedMD5Base64 string) (*hashingReader, error) {
+type hashingReader struct {
+	inner       io.Reader
+	expectedStr string
+	expected    []byte
+	hash        hash.Hash
+	sum         []byte
+}
+
+func NewHashingReader(inner io.Reader, optExpectedMD5Base64 string) (HashingReader, error) {
 	var md5Bytes []byte
 	var err error
 
-	if expectedMD5Base64 != "" {
-		md5Bytes, err = base64.StdEncoding.DecodeString(expectedMD5Base64)
+	if optExpectedMD5Base64 != "" {
+		md5Bytes, err = base64.StdEncoding.DecodeString(optExpectedMD5Base64)
 		if err != nil {
 			return nil, ErrInvalidDigest
 		}
@@ -40,6 +47,17 @@ func newHashingReader(inner io.Reader, expectedMD5Base64 string) (*hashingReader
 		expected: md5Bytes,
 		hash:     md5.New(),
 	}, nil
+}
+
+func (h *hashingReader) GetExpectedMD5() []byte {
+	if h.expected == nil {
+		return nil
+	}
+
+	ret := make([]byte, len(h.expected))
+	copy(ret, h.expected)
+
+	return ret
 }
 
 // Sum returns the hash of the data read from the inner reader so far.
