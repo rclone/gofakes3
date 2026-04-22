@@ -1,19 +1,20 @@
 package gofakes3
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 )
 
 type chunkedReader struct {
-	inner         io.Reader
+	inner         *bufio.Reader
 	chunkRemain   int
 	notFirstChunk bool
 }
 
 func newChunkedReader(inner io.Reader) *chunkedReader {
 	return &chunkedReader{
-		inner:         inner,
+		inner:         bufio.NewReader(inner),
 		chunkRemain:   0,
 		notFirstChunk: false,
 	}
@@ -62,15 +63,7 @@ func (r *chunkedReader) Read(p []byte) (n int, err error) {
 }
 
 // discardLine discards bytes up to and including '\n'.
-func discardLine(r io.Reader) error {
-	var b [1]byte
-	for {
-		_, err := io.ReadFull(r, b[:])
-		if err != nil {
-			return err
-		}
-		if b[0] == '\n' {
-			return nil
-		}
-	}
+func discardLine(r *bufio.Reader) error {
+	_, err := r.ReadSlice('\n')
+	return err
 }
