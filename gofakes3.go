@@ -704,7 +704,7 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 
 	var reader io.Reader
 
-	if sha, ok := meta["X-Amz-Content-Sha256"]; ok && sha == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" {
+	if isChunkedStreamingPayload(meta["X-Amz-Content-Sha256"]) {
 		reader = newChunkedReader(r.Body)
 	} else {
 		reader = r.Body
@@ -954,7 +954,7 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 	}
 
 	var rdr io.Reader
-	if sha, ok := meta["X-Amz-Content-Sha256"]; ok && sha == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" {
+	if isChunkedStreamingPayload(meta["X-Amz-Content-Sha256"]) {
 		rdr = newChunkedReader(r.Body)
 		size, err = strconv.ParseInt(meta["X-Amz-Decoded-Content-Length"], 10, 64)
 		if err != nil {
@@ -1009,6 +1009,12 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 
 	w.Header().Add("ETag", etag)
 	return nil
+}
+
+// isChunkedStreamingPayload reports whether x-amz-content-sha256 denotes aws-chunked transfer encoding.
+func isChunkedStreamingPayload(value string) bool {
+	return value == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" ||
+		value == "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
 }
 
 func (g *GoFakeS3) abortMultipartUpload(bucket, object string, uploadID UploadID, w http.ResponseWriter, r *http.Request) error {

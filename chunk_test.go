@@ -34,6 +34,18 @@ func TestChunkedUploadSuccess(t *testing.T) {
 	assert.Equal(t, string(buf), strings.Repeat("a", 65536+1024))
 }
 
+func TestChunkedUploadSuccessUnsignedTrailer(t *testing.T) {
+	payload := "5\r\n"
+	payload += "hello\r\n"
+	payload += "0\r\n"
+
+	inner := strings.NewReader(payload)
+	chunkedReader := newChunkedReader(inner)
+	buf, err := io.ReadAll(chunkedReader)
+	assert.Equal(t, nil, err)
+	assert.Equal(t, "hello", string(buf))
+}
+
 type errReader struct{}
 
 func (errReader) Read(p []byte) (n int, err error) {

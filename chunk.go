@@ -48,16 +48,29 @@ func (r *chunkedReader) Read(p []byte) (n int, err error) {
 			}
 			// read next chunk header
 			chunkSize := 0
-			_, err = fmt.Fscanf(r.inner, "%x;", &chunkSize)
+			_, err = fmt.Fscanf(r.inner, "%x", &chunkSize)
 			if err != nil {
 				return n, err
 			}
 			r.chunkRemain = chunkSize
-			_, err = io.CopyN(io.Discard, r.inner, 16+64+2) // "chunk-signature=" + sizeOfHash + "\r\n"
-			if err != nil {
+			if err := discardLine(r.inner); err != nil {
 				return n, err
 			}
 		}
 	}
 	return n, nil
+}
+
+// discardLine discards bytes up to and including '\n'.
+func discardLine(r io.Reader) error {
+	var b [1]byte
+	for {
+		_, err := io.ReadFull(r, b[:])
+		if err != nil {
+			return err
+		}
+		if b[0] == '\n' {
+			return nil
+		}
+	}
 }

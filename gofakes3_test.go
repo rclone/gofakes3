@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"reflect"
@@ -19,6 +20,7 @@ import (
 	xml "github.com/minio/xxml"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/rclone/gofakes3"
@@ -156,6 +158,37 @@ func TestCreateObject(t *testing.T) {
 	if *out.ETag != `"5d41402abc4b2a76b9719d911017c592"` { // md5("hello")
 		ts.Fatal("bad etag", out.ETag)
 	}
+
+	obj := ts.backendGetString(defaultBucket, "object", nil)
+	if obj != "hello" {
+		t.Fatal("object creation failed")
+	}
+}
+
+func TestCreateObjectTrailingHeaders(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	ctx := context.Background()
+	tlsServer := httptest.NewTLSServer(ts.GoFakeS3.Server())
+	defer tlsServer.Close()
+
+	svc := s3.NewFromConfig(aws.Config{Region: "region"}, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(tlsServer.URL)
+		o.UsePathStyle = true
+		o.HTTPClient = tlsServer.Client()
+		o.Credentials = &credentials.StaticCredentialsProvider{Value: aws.Credentials{
+			AccessKeyID:     "dummy-access",
+			SecretAccessKey: "dummy-secret",
+		}}
+	})
+
+	_, err := svc.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:            aws.String(defaultBucket),
+		Key:               aws.String("object"),
+		Body:              bytes.NewReader([]byte("hello")),
+		ChecksumAlgorithm: types.ChecksumAlgorithmSha256,
+	})
+	ts.OK(err)
 
 	obj := ts.backendGetString(defaultBucket, "object", nil)
 	if obj != "hello" {
