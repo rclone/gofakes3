@@ -104,3 +104,10 @@ func WithAutoBucket(enabled bool) Option {
 func WithUploadOwner(owner func(ctx context.Context) string) Option {
 	return func(g *GoFakeS3) { g.uploadOwner = owner }
 }
+
+// WithPathPrefixForSignatureVerification instructs GoFakeS3 to add a prefix to the request URL
+// before verifying the auth signature. This is useful when GoFakeS3 is running
+// behind a reverse proxy that strips a prefix like '/s3' from the URL path.
+func WithPathPrefixForSignatureVerification(prefix string) Option {
+	return func(g *GoFakeS3) { g.pathPrefixForSignatureVerification = prefix }
+}

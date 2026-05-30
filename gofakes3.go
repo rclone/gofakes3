@@ -48,6 +48,9 @@ type GoFakeS3 struct {
 	uploadOwner             func(ctx context.Context) string // nil if uploads aren't private
 	log                     Logger
 
+	// prefix added to the path before checking signatures
+	pathPrefixForSignatureVerification string
+
 	// simple v4 signature
 	mu         sync.RWMutex // protects vAuthPair map only
 	v4AuthPair map[string]string
@@ -58,12 +61,13 @@ type GoFakeS3 struct {
 // gofakes3/backends package.
 func New(backend Backend, options ...Option) *GoFakeS3 {
 	s3 := &GoFakeS3{
-		storage:           backend,
-		timeSkew:          DefaultSkewLimit,
-		metadataSizeLimit: DefaultMetadataSizeLimit,
-		integrityCheck:    true,
-		uploader:          newUploader(),
-		requestID:         0,
+		storage:                            backend,
+		timeSkew:                           DefaultSkewLimit,
+		metadataSizeLimit:                  DefaultMetadataSizeLimit,
+		integrityCheck:                     true,
+		uploader:                           newUploader(),
+		requestID:                          0,
+		pathPrefixForSignatureVerification: "",
 	}
 
 	// versioned MUST be set before options as one of the options disables it:
@@ -166,7 +170,11 @@ func (g *GoFakeS3) authMiddleware(handler http.Handler) http.Handler {
 		haveAuth := len(g.v4AuthPair) > 0
 		g.mu.RUnlock()
 		if haveAuth {
-			if result := signature.V4SignVerifyWithLookup(rq, g.lookupAuthKey); result != signature.ErrNone {
+			verificationRq := rq.Clone(rq.Context())
+			if g.pathPrefixForSignatureVerification != "" {
+				verificationRq.URL.Path = g.pathPrefixForSignatureVerification + verificationRq.URL.Path
+			}
+			if result := signature.V4SignVerifyWithLookup(verificationRq, g.lookupAuthKey); result != signature.ErrNone {
 				g.log.Print(LogWarn, "Access Denied:", rq.RemoteAddr, "=>", rq.URL)
 
 				resp := signature.GetAPIError(result)
