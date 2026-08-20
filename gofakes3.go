@@ -729,7 +729,11 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 	// hashingReader is still needed to get the ETag even if integrityCheck
 	// is set to false:
 	rdr, err := newHashingReader(reader, md5Base64)
-	defer CheckClose(r.Body, &err)
+	// The error from closing the request body is discarded - from go1.27
+	// Close returns io.EOF if the body was not read to EOF (eg when the
+	// body contains unread trailing headers), and a close error tells us
+	// nothing useful anyway as real I/O problems surface from Read.
+	defer func() { _ = r.Body.Close() }()
 	if err != nil {
 		return err
 	}
@@ -877,7 +881,11 @@ func (g *GoFakeS3) deleteMulti(bucket string, w http.ResponseWriter, r *http.Req
 
 	var in DeleteRequest
 
-	defer CheckClose(r.Body, &err)
+	// The error from closing the request body is discarded - from go1.27
+	// Close returns io.EOF if the body was not read to EOF (eg when the
+	// body contains unread trailing headers), and a close error tells us
+	// nothing useful anyway as real I/O problems surface from Read.
+	defer func() { _ = r.Body.Close() }()
 	dc := xml.NewDecoder(r.Body)
 	if err := dc.Decode(&in); err != nil {
 		return ErrorMessage(ErrMalformedXML, err.Error())
@@ -971,7 +979,11 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 		return err
 	}
 
-	defer CheckClose(r.Body, &err)
+	// The error from closing the request body is discarded - from go1.27
+	// Close returns io.EOF if the body was not read to EOF (eg when the
+	// body contains unread trailing headers), and a close error tells us
+	// nothing useful anyway as real I/O problems surface from Read.
+	defer func() { _ = r.Body.Close() }()
 
 	meta, err := metadataHeaders(r.Header, g.timeSource.Now(), g.metadataSizeLimit)
 	if err != nil {
