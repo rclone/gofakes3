@@ -167,6 +167,25 @@ func V4SignVerifyWithSecret(r *http.Request, secretKey string) ErrorCode {
 	})
 }
 
+// V4SignVerifyWithLookup verifies the request's signature against the
+// secret returned by lookup for the access key ID in the request,
+// without consulting the keys registered with StoreKeys.
+//
+// lookup returns the secret for the access key ID and true, or false
+// if the access key ID is unknown, in which case the request is
+// refused with InvalidAccessKeyId.
+//
+// returns ErrNone if signature matches.
+func V4SignVerifyWithLookup(r *http.Request, lookup func(accessKey string) (secretKey string, ok bool)) ErrorCode {
+	return v4SignVerify(r, func(accessKey string) (string, ErrorCode) {
+		secretKey, ok := lookup(accessKey)
+		if !ok {
+			return "", errInvalidAccessKeyID
+		}
+		return secretKey, ErrNone
+	})
+}
+
 // v4SignVerify verifies the request's signature using getSecret to
 // find the secret key for the access key ID in the request.
 func v4SignVerify(r *http.Request, getSecret func(accessKey string) (string, ErrorCode)) ErrorCode {
