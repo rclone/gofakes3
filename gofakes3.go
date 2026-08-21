@@ -76,8 +76,12 @@ func New(backend Backend, options ...Option) *GoFakeS3 {
 		s3.timeSource = DefaultTimeSource()
 	}
 
+	// Copy the keys given with WithV4Auth so the caller's map isn't
+	// shared with this instance
 	if len(s3.v4AuthPair) != 0 {
-		s3.AddAuthKeys(s3.v4AuthPair)
+		pairs := s3.v4AuthPair
+		s3.v4AuthPair = nil
+		s3.AddAuthKeys(pairs)
 	}
 
 	return s3
@@ -102,31 +106,48 @@ func (g *GoFakeS3) Server() http.Handler {
 	return g.authMiddleware(handler)
 }
 
+// AddAuthKeys adds access key ID to secret pairs which this instance
+// accepts. The keys are private to this instance.
 func (g *GoFakeS3) AddAuthKeys(p map[string]string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.v4AuthPair == nil {
+		g.v4AuthPair = map[string]string{}
+	}
 	for k, v := range p {
 		g.v4AuthPair[k] = v
 	}
-	signature.StoreKeys(g.v4AuthPair)
 }
 
+// DelAuthKeys removes the access key IDs given from those this
+// instance accepts.
 func (g *GoFakeS3) DelAuthKeys(p []string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for _, v := range p {
 		delete(g.v4AuthPair, v)
 	}
-	signature.ReloadKeys(g.v4AuthPair)
 }
 
+// lookupAuthKey returns the secret for accessKey if this instance
+// accepts it.
+func (g *GoFakeS3) lookupAuthKey(accessKey string) (secretKey string, ok bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	secretKey, ok = g.v4AuthPair[accessKey]
+	return secretKey, ok
+}
+
+// authMiddleware refuses requests which aren't signed with one of
+// this instance's keys. If no keys have been added all requests are
+// allowed.
 func (g *GoFakeS3) authMiddleware(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, rq *http.Request) {
 		g.mu.RLock()
 		haveAuth := len(g.v4AuthPair) > 0
 		g.mu.RUnlock()
 		if haveAuth {
-			if result := signature.V4SignVerify(rq); result != signature.ErrNone {
+			if result := signature.V4SignVerifyWithLookup(rq, g.lookupAuthKey); result != signature.ErrNone {
 				g.log.Print(LogWarn, "Access Denied:", rq.RemoteAddr, "=>", rq.URL)
 
 				resp := signature.GetAPIError(result)
