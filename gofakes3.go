@@ -32,15 +32,16 @@ type GoFakeS3 struct {
 	versioned VersionedBackend
 	multipart MultipartBackend // nil if storage does not implement MultipartBackend
 
-	timeSource              TimeSource
-	timeSkew                time.Duration
-	metadataSizeLimit       int
-	integrityCheck          bool
-	failOnUnimplementedPage bool
-	hostBucket              bool
-	autoBucket              bool
-	uploader                *uploader
-	log                     Logger
+	timeSource                         TimeSource
+	timeSkew                           time.Duration
+	metadataSizeLimit                  int
+	integrityCheck                     bool
+	failOnUnimplementedPage            bool
+	hostBucket                         bool
+	autoBucket                         bool
+	uploader                           *uploader
+	log                                Logger
+	pathPrefixForSignatureVerification string
 
 	// simple v4 signature
 	mu         sync.RWMutex // protects vAuthPair map only
@@ -52,12 +53,13 @@ type GoFakeS3 struct {
 // gofakes3/backends package.
 func New(backend Backend, options ...Option) *GoFakeS3 {
 	s3 := &GoFakeS3{
-		storage:           backend,
-		timeSkew:          DefaultSkewLimit,
-		metadataSizeLimit: DefaultMetadataSizeLimit,
-		integrityCheck:    true,
-		uploader:          newUploader(),
-		requestID:         0,
+		storage:                            backend,
+		timeSkew:                           DefaultSkewLimit,
+		metadataSizeLimit:                  DefaultMetadataSizeLimit,
+		integrityCheck:                     true,
+		uploader:                           newUploader(),
+		requestID:                          0,
+		pathPrefixForSignatureVerification: "",
 	}
 
 	// versioned MUST be set before options as one of the options disables it:
@@ -126,7 +128,11 @@ func (g *GoFakeS3) authMiddleware(handler http.Handler) http.Handler {
 		haveAuth := len(g.v4AuthPair) > 0
 		g.mu.RUnlock()
 		if haveAuth {
-			if result := signature.V4SignVerify(rq); result != signature.ErrNone {
+			verificationRq := rq.Clone(rq.Context())
+			if g.pathPrefixForSignatureVerification != "" {
+				verificationRq.URL.Path = g.pathPrefixForSignatureVerification + verificationRq.URL.Path
+			}
+			if result := signature.V4SignVerify(verificationRq); result != signature.ErrNone {
 				g.log.Print(LogWarn, "Access Denied:", rq.RemoteAddr, "=>", rq.URL)
 
 				resp := signature.GetAPIError(result)
