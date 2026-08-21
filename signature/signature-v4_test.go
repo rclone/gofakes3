@@ -132,6 +132,49 @@ func TestUnsignedPayload(t *testing.T) {
 	}
 }
 
+func TestV4SignVerifyWithSecret(t *testing.T) {
+	ctx := context.Background()
+
+	const (
+		ak     = "AKIAWITHSECRETTESTKEY"
+		sk     = "with-secret-test-secret-key"
+		region = "us-east-1"
+	)
+
+	credentials := aws.Credentials{
+		AccessKeyID:     ak,
+		SecretAccessKey: sk,
+	}
+	// The access key is deliberately not registered with ReloadKeys
+	signer := v4signer.NewSigner()
+
+	req, err := http.NewRequest(http.MethodGet, "https://s3-endpoint.example.com/bin", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Amz-Content-Sha256", unsignedPayload)
+	err = signer.SignHTTP(ctx, credentials, req, unsignedPayload, serviceS3, region, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result := signature.V4SignVerifyWithSecret(req, sk); result != signature.ErrNone {
+		t.Errorf("expected ErrNone with correct secret but got %+v", signature.GetAPIError(result))
+	}
+	if result := signature.V4SignVerifyWithSecret(req, sk+"x"); result == signature.ErrNone {
+		t.Errorf("expected an error with wrong secret but got ErrNone")
+	} else if code := signature.GetAPIError(result).Code; code != "SignatureDoesNotMatch" {
+		t.Errorf("expected SignatureDoesNotMatch with wrong secret but got %q", code)
+	}
+	if result := signature.V4SignVerifyWithSecret(req, ""); result == signature.ErrNone {
+		t.Errorf("expected an error with empty secret but got ErrNone")
+	}
+	// The unregistered key must still be refused by the key store path
+	if result := signature.V4SignVerify(req); result == signature.ErrNone {
+		t.Errorf("expected an error from V4SignVerify for an unregistered key but got ErrNone")
+	}
+}
+
 func TestCheckExpiration(t *testing.T) {
 	ctx := context.Background()
 	originalTimeNow := signature.TimeNow

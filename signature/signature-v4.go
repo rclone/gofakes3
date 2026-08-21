@@ -141,8 +141,35 @@ func getSigningKey(secretKey string, t time.Time, region string) []byte {
 // V4SignVerify - Verify authorization header with calculated header in accordance with
 //   - http://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html
 //
-// returns nil if signature matches.
+// The secret key is looked up from the keys registered with StoreKeys
+// using the access key ID in the request.
+//
+// returns ErrNone if signature matches.
 func V4SignVerify(r *http.Request) ErrorCode {
+	return v4SignVerify(r, func(accessKey string) (string, ErrorCode) {
+		cred, _, err := checkKeyValid(r, accessKey)
+		return cred.SecretKey, err
+	})
+}
+
+// V4SignVerifyWithSecret verifies the request's signature against
+// secretKey regardless of the access key ID in the request and
+// without consulting the keys registered with StoreKeys.
+//
+// This is for callers which look up the secret for the access key ID
+// themselves (eg per request from an external source) and want the
+// secret kept out of the key store.
+//
+// returns ErrNone if signature matches.
+func V4SignVerifyWithSecret(r *http.Request, secretKey string) ErrorCode {
+	return v4SignVerify(r, func(string) (string, ErrorCode) {
+		return secretKey, ErrNone
+	})
+}
+
+// v4SignVerify verifies the request's signature using getSecret to
+// find the secret key for the access key ID in the request.
+func v4SignVerify(r *http.Request, getSecret func(accessKey string) (string, ErrorCode)) ErrorCode {
 	// Copy request.
 	req := *r
 	queryf := req.URL.Query()
@@ -167,7 +194,7 @@ func V4SignVerify(r *http.Request) ErrorCode {
 		return Err
 	}
 
-	cred, _, Err := checkKeyValid(r, signV4Values.Credential.accessKey)
+	secretKey, Err := getSecret(signV4Values.Credential.accessKey)
 	if Err != ErrNone {
 		return Err
 	}
@@ -220,7 +247,7 @@ func V4SignVerify(r *http.Request) ErrorCode {
 	rawquery := queryf.Encode()
 
 	// Get hmac signing key.
-	signingKey := getSigningKey(cred.SecretKey, signV4Values.Credential.scope.date, signV4Values.Credential.scope.region)
+	signingKey := getSigningKey(secretKey, signV4Values.Credential.scope.date, signV4Values.Credential.scope.region)
 
 	var newSignature string
 	if isUnsignedPayload {
