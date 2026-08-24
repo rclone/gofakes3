@@ -2,6 +2,7 @@ package gofakes3
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -986,6 +987,18 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 		return ErrInvalidPart
 	}
 
+	// An UploadPartCopy request carries no body: the part is copied
+	// server-side from an existing object instead. Handle it before any
+	// body/size parsing, which would otherwise fail on a request without a
+	// Content-Length header.
+	if r.Header.Get("X-Amz-Copy-Source") != "" {
+		upload, err := g.uploader.Get(bucket, object, uploadID)
+		if err != nil {
+			return err
+		}
+		return g.copyMultipartUploadPart(upload, partNumber, r, w)
+	}
+
 	size, err := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
 	if err != nil {
 		return ErrMissingContentLength
@@ -1051,34 +1064,121 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 		}
 	}
 
-	if upload.streaming {
-		etag, err := g.multipart.UploadPart(r.Context(), bucket, object, uploadID, int(partNumber), size, rdr)
-		if err != nil {
-			return err
-		}
-		if err := upload.AddStreamingPart(int(partNumber), g.timeSource.Now(), size, etag); err != nil {
-			return err
-		}
-		w.Header().Add("ETag", etag)
-		return nil
-	}
-
-	body, err := ReadAll(rdr, size)
-	if err != nil {
-		return err
-	}
-
-	if int64(len(body)) != size {
-		return ErrIncompleteBody
-	}
-
-	etag, err := upload.AddPart(int(partNumber), g.timeSource.Now(), body)
+	etag, err := g.storeMultipartUploadPart(r.Context(), upload, int(partNumber), size, rdr)
 	if err != nil {
 		return err
 	}
 
 	w.Header().Add("ETag", etag)
 	return nil
+}
+
+// copyMultipartUploadPart implements UploadPartCopy: the part is copied
+// server-side from an existing object (optionally a range of it) into the
+// given multipart upload, instead of being streamed by the client.
+func (g *GoFakeS3) copyMultipartUploadPart(upload *multipartUpload, partNumber int64, r *http.Request, w http.ResponseWriter) (err error) {
+	source := r.Header.Get("X-Amz-Copy-Source")
+	g.log.Print(LogInfo, "copy multipart upload part", source, "TO", upload.Bucket, upload.Object)
+
+	srcBucket, srcKey, err := splitCopySource(source)
+	if err != nil {
+		return err
+	}
+
+	srcObj, err := g.storage.HeadObject(r.Context(), srcBucket, srcKey)
+	if err != nil {
+		return err
+	}
+
+	copyRange, err := copySourceRange(r.Header.Get("X-Amz-Copy-Source-Range"), srcObj.Size)
+	if err != nil {
+		return err
+	}
+
+	srcObj, err = g.storage.GetObject(r.Context(), srcBucket, srcKey, nil)
+	if err != nil {
+		return err
+	}
+	defer CheckClose(srcObj.Contents, &err)
+
+	size := srcObj.Size
+	rdr := io.Reader(srcObj.Contents)
+	if copyRange != nil {
+		size = copyRange.Length
+		if seeker, ok := srcObj.Contents.(io.Seeker); ok {
+			if _, err := seeker.Seek(copyRange.Start, io.SeekStart); err != nil {
+				return err
+			}
+		} else {
+			if _, err := io.CopyN(io.Discard, srcObj.Contents, copyRange.Start); err != nil {
+				return err
+			}
+		}
+	}
+	rdr = io.LimitReader(rdr, size)
+
+	etag, err := g.storeMultipartUploadPart(r.Context(), upload, int(partNumber), size, rdr)
+	if err != nil {
+		return err
+	}
+
+	return g.xmlEncoder(w).Encode(&CopyPartResult{
+		ETag:         etag,
+		LastModified: NewContentTime(g.timeSource.Now()),
+	})
+}
+
+// storeMultipartUploadPart stores a part either into the MultipartBackend
+// (streaming) or the in-memory uploader, returning the ETag of the stored part.
+func (g *GoFakeS3) storeMultipartUploadPart(ctx context.Context, upload *multipartUpload, partNumber int, size int64, rdr io.Reader) (string, error) {
+	if upload.streaming {
+		etag, err := g.multipart.UploadPart(ctx, upload.Bucket, upload.Object, upload.ID, partNumber, size, rdr)
+		if err != nil {
+			return "", err
+		}
+		if err := upload.AddStreamingPart(partNumber, g.timeSource.Now(), size, etag); err != nil {
+			return "", err
+		}
+		return etag, nil
+	}
+
+	body, err := ReadAll(rdr, size)
+	if err != nil {
+		return "", err
+	}
+	if int64(len(body)) != size {
+		return "", ErrIncompleteBody
+	}
+	return upload.AddPart(partNumber, g.timeSource.Now(), body)
+}
+
+// splitCopySource parses an X-Amz-Copy-Source header into a bucket and key,
+// handling the leading slash and any versionId query subresource.
+func splitCopySource(source string) (bucket, key string, err error) {
+	parts := strings.SplitN(strings.TrimPrefix(source, "/"), "/", 2)
+	if len(parts) != 2 {
+		return "", "", ErrorMessage(ErrInvalidArgument, fmt.Sprintf("invalid copy source %q", source))
+	}
+	bucket = parts[0]
+	key = strings.SplitN(parts[1], "?", 2)[0]
+	key, err = url.QueryUnescape(key)
+	if err != nil {
+		return "", "", err
+	}
+	return bucket, key, nil
+}
+
+// copySourceRange parses the optional X-Amz-Copy-Source-Range header and
+// resolves it against the source object size.
+func copySourceRange(header string, size int64) (*ObjectRange, error) {
+	if header == "" {
+		return nil, nil
+	}
+	req, err := parseRangeHeader(header)
+	if err != nil {
+		return nil, err
+	}
+	return req.Range(size)
 }
 
 // isChunkedStreamingPayload reports whether x-amz-content-sha256 denotes aws-chunked transfer encoding.

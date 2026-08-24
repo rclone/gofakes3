@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -1399,4 +1400,160 @@ func TestGetObjectResponseOverride(t *testing.T) {
 			t.Fatalf("expected Content-Type %q, got %v", contentType, obj.ContentType)
 		}
 	})
+}
+
+func TestUploadPartCopy(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	ctx := context.Background()
+	svc := ts.s3Client()
+
+	content := "source data for the multipart part copy\n"
+	ts.backendPutString(defaultBucket, "src-key", nil, content)
+
+	uploadID := ts.createMultipartUpload(defaultBucket, "dst-key", nil)
+
+	part, err := svc.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+		Bucket:     aws.String(defaultBucket),
+		Key:        aws.String("dst-key"),
+		UploadId:   aws.String(uploadID),
+		PartNumber: aws.Int32(1),
+		CopySource: aws.String("/" + defaultBucket + "/src-key"),
+	})
+	ts.OK(err)
+	if part.CopyPartResult == nil || part.CopyPartResult.ETag == nil || *part.CopyPartResult.ETag == "" {
+		t.Fatal("UploadPartCopy did not return a CopyPartResult with an ETag")
+	}
+
+	ts.assertCompleteUpload(defaultBucket, "dst-key", uploadID, []types.CompletedPart{
+		{PartNumber: aws.Int32(1), ETag: part.CopyPartResult.ETag},
+	}, content)
+}
+
+func TestUploadPartCopyStreaming(t *testing.T) {
+	be := newStreamingBackend(s3mem.New())
+	ts := newTestServer(t, withBackend(be))
+	defer ts.Close()
+	ctx := context.Background()
+	svc := ts.s3Client()
+
+	content := "streamed source data for the multipart part copy\n"
+	ts.backendPutString(defaultBucket, "src-key", nil, content)
+
+	uploadID := ts.createMultipartUpload(defaultBucket, "dst-key", nil)
+
+	part, err := svc.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+		Bucket:     aws.String(defaultBucket),
+		Key:        aws.String("dst-key"),
+		UploadId:   aws.String(uploadID),
+		PartNumber: aws.Int32(1),
+		CopySource: aws.String("/" + defaultBucket + "/src-key"),
+	})
+	ts.OK(err)
+	if part.CopyPartResult == nil || part.CopyPartResult.ETag == nil || *part.CopyPartResult.ETag == "" {
+		t.Fatal("UploadPartCopy did not return a CopyPartResult with an ETag")
+	}
+
+	ts.assertCompleteUpload(defaultBucket, "dst-key", uploadID, []types.CompletedPart{
+		{PartNumber: aws.Int32(1), ETag: part.CopyPartResult.ETag},
+	}, content)
+
+	if be.createCalls != 1 || be.completeCalls != 1 || be.uploadCalls != 1 {
+		t.Fatalf("expected one create+upload+complete through the streaming path, got create=%d upload=%d complete=%d", be.createCalls, be.uploadCalls, be.completeCalls)
+	}
+}
+
+func TestUploadPartCopyRange(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	ctx := context.Background()
+	svc := ts.s3Client()
+
+	content := "0123456789abcdefgh"
+	ts.backendPutString(defaultBucket, "src-key", nil, content)
+
+	uploadID := ts.createMultipartUpload(defaultBucket, "dst-key", nil)
+
+	part, err := svc.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+		Bucket:          aws.String(defaultBucket),
+		Key:             aws.String("dst-key"),
+		UploadId:        aws.String(uploadID),
+		PartNumber:      aws.Int32(1),
+		CopySource:      aws.String("/" + defaultBucket + "/src-key"),
+		CopySourceRange: aws.String("bytes=4-9"),
+	})
+	ts.OK(err)
+	if part.CopyPartResult == nil || part.CopyPartResult.ETag == nil || *part.CopyPartResult.ETag == "" {
+		t.Fatal("UploadPartCopy did not return a CopyPartResult with an ETag")
+	}
+
+	ts.assertCompleteUpload(defaultBucket, "dst-key", uploadID, []types.CompletedPart{
+		{PartNumber: aws.Int32(1), ETag: part.CopyPartResult.ETag},
+	}, "456789")
+}
+
+// TestUploadPartCopyWithoutContentLength checks that an UploadPartCopy
+// request is accepted even when it carries no Content-Length header. Such a
+// request is valid: the part is copied server-side and has no body.
+func TestUploadPartCopyWithoutContentLength(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	content := "source data for the multipart part copy\n"
+	ts.backendPutString(defaultBucket, "src-key", nil, content)
+	uploadID := ts.createMultipartUpload(defaultBucket, "dst-key", nil)
+
+	host := ts.server.Listener.Addr().String()
+	conn, err := net.Dial("tcp", host)
+	ts.OK(err)
+	defer conn.Close()
+
+	// A raw request with no Content-Length header; the part is copied
+	// server-side so there is no body to size.
+	req := fmt.Sprintf("PUT /%s/%s?uploadId=%s&partNumber=1 HTTP/1.1\r\nHost: %s\r\nX-Amz-Copy-Source: /%s/%s\r\n\r\n",
+		defaultBucket, "dst-key", uploadID, host, defaultBucket, "src-key")
+	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(conn, req); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	ts.OK(err)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// TestUploadPartCopyRangeStatusOK checks that a ranged UploadPartCopy answers
+// 200 with a CopyPartResult, matching S3. The range is an input parameter,
+// not a partial response.
+func TestUploadPartCopyRangeStatusOK(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	content := "0123456789abcdefgh"
+	ts.backendPutString(defaultBucket, "src-key", nil, content)
+	uploadID := ts.createMultipartUpload(defaultBucket, "dst-key", nil)
+
+	u := fmt.Sprintf("%s/%s/%s?uploadId=%s&partNumber=1", ts.server.URL, defaultBucket, "dst-key", uploadID)
+	req, err := http.NewRequest(http.MethodPut, u, nil)
+	ts.OK(err)
+	req.Header.Set("X-Amz-Copy-Source", "/"+defaultBucket+"/src-key")
+	req.Header.Set("X-Amz-Copy-Source-Range", "bytes=4-9")
+
+	resp, err := ts.server.Client().Do(req)
+	ts.OK(err)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	if !bytes.Contains(body, []byte("CopyPartResult")) {
+		t.Fatalf("expected a CopyPartResult body, got %s", body)
+	}
 }
