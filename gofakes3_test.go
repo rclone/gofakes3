@@ -1400,3 +1400,61 @@ func TestGetObjectResponseOverride(t *testing.T) {
 		}
 	})
 }
+
+func TestContextCancellationGetObjectCopy(t *testing.T) {
+	ts := newTestServer(t, withBackend(&infiniteReadBackend{s3mem.New()}))
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.url(defaultBucket+"/anything"), nil)
+		if err != nil {
+			done <- err
+			return
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			done <- err
+			return
+		}
+		defer resp.Body.Close()
+		_, err = io.ReadAll(resp.Body)
+		done <- err
+	}()
+
+	// ensure io.Copy starts before cancel
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected (at least some) error on cancel")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetObject did not terminate after context cancellation")
+	}
+}
+
+type infiniteReadBackend struct {
+	gofakes3.Backend
+}
+
+func (b *infiniteReadBackend) GetObject(ctx context.Context, bucket, object string, rnge *gofakes3.ObjectRangeRequest) (*gofakes3.Object, error) {
+	return &gofakes3.Object{
+		Name:     object,
+		Size:     1<<62 - 1,
+		Contents: io.NopCloser(zeroReader{}),
+	}, nil
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 0
+	}
+	return len(p), nil
+}

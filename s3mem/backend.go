@@ -102,6 +102,9 @@ func (db *Backend) ListBucket(ctx context.Context, name string, prefix *gofakes3
 	var lastMatchedPart string
 
 	for iter.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		item := iter.Value().(*bucketObject)
 
 		if !prefix.Match(item.data.name, &match) {
@@ -222,7 +225,7 @@ func (db *Backend) PutObject(ctx context.Context, bucketName, objectName string,
 	// No need to lock the backend while we read the data into memory; it holds
 	// the write lock open unnecessarily, and could be blocked for an unreasonably
 	// long time by a connection timing out:
-	bts, err := gofakes3.ReadAll(input, size)
+	bts, err := gofakes3.ReadAll(gofakes3.NewContextReader(ctx, input), size)
 	if err != nil {
 		return result, err
 	}

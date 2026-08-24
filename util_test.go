@@ -1,6 +1,7 @@
 package gofakes3
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -59,6 +60,25 @@ func TestReadAll(t *testing.T) {
 		_, err := ReadAll(strings.NewReader("test"), 3)
 		if !HasErrorCode(err, ErrIncompleteBody) {
 			t.Fatal("expected ErrIncompleteBody, found", err)
+		}
+	})
+}
+
+func TestNewContextReader(t *testing.T) {
+	t.Run("simple-read", func(t *testing.T) {
+		tt := TT{t}
+		b, err := ReadAll(NewContextReader(t.Context(), strings.NewReader("test")), 4)
+		tt.OK(err)
+		if string(b) != "test" {
+			t.Fatal(string(b), "!=", "test")
+		}
+	})
+	t.Run("canceled-ctx", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := ReadAll(NewContextReader(ctx, strings.NewReader("test")), 4)
+		if err == nil {
+			t.Fatal("expected error when reading with canceled context")
 		}
 	})
 }

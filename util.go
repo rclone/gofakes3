@@ -1,6 +1,7 @@
 package gofakes3
 
 import (
+	"context"
 	"io"
 	"strconv"
 )
@@ -54,4 +55,28 @@ func ReadAll(r io.Reader, size int64) (b []byte, err error) {
 	}
 
 	return b, nil
+}
+
+// NewContextReader - context aware Reader treating context `Err()`s as Read errors
+func NewContextReader(ctx context.Context, r io.Reader) io.Reader {
+	return &contextReader{ctx: ctx, r: r}
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (cr *contextReader) Read(p []byte) (int, error) {
+	if err := cr.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return cr.r.Read(p)
+}
+
+func (cr *contextReader) WriteTo(w io.Writer) (int64, error) {
+	if err := cr.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return io.Copy(w, cr.r)
 }

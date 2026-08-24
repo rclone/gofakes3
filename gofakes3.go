@@ -534,7 +534,7 @@ func (g *GoFakeS3) getObject(
 	// Writes Content-Length, and Content-Range if applicable:
 	obj.Range.writeHeader(obj.Size, w)
 
-	if _, err := io.Copy(w, obj.Contents); err != nil {
+	if _, err := io.Copy(w, NewContextReader(r.Context(), obj.Contents)); err != nil {
 		return err
 	}
 
