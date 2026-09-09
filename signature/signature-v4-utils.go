@@ -3,6 +3,7 @@ package signature
 import (
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 var (
@@ -10,6 +11,13 @@ var (
 )
 
 // extractSignedHeaders extract signed headers from Authorization header
+//
+// Every x-amz-* header in the request must be in signedHeaders, as
+// AWS requires, otherwise errUnsignedHeaders is returned. The
+// signature only covers the listed headers, so an unsigned x-amz-*
+// header could otherwise change what a signed request does - eg a
+// presigned PUT URL, which signs only the host, could be turned into
+// a copy from any object by adding an unsigned x-amz-copy-source.
 func extractSignedHeaders(signedHeaders []string, r *http.Request) (http.Header, ErrorCode) {
 	reqHeaders := r.Header
 	reqQueries := r.URL.Query()
@@ -17,6 +25,11 @@ func extractSignedHeaders(signedHeaders []string, r *http.Request) (http.Header,
 	// if not return ErrUnsignedHeaders. "host" is mandatory.
 	if !contains(signedHeaders, "host") {
 		return nil, errUnsignedHeaders
+	}
+	for header := range reqHeaders {
+		if len(header) >= 6 && strings.EqualFold(header[:6], "x-amz-") && !containsFold(signedHeaders, header) {
+			return nil, errUnsignedHeaders
+		}
 	}
 	extractedSignedHeaders := make(http.Header)
 	for _, header := range signedHeaders {
@@ -66,6 +79,16 @@ func extractSignedHeaders(signedHeaders []string, r *http.Request) (http.Header,
 		}
 	}
 	return extractedSignedHeaders, ErrNone
+}
+
+// containsFold reports whether headers contains header, ignoring case.
+func containsFold(headers []string, header string) bool {
+	for _, h := range headers {
+		if strings.EqualFold(h, header) {
+			return true
+		}
+	}
+	return false
 }
 
 // Returns SHA256 for calculating canonical-request.
