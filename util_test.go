@@ -1,8 +1,10 @@
 package gofakes3
 
 import (
+	"runtime"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 func TestParseClampedIntValid(t *testing.T) {
@@ -39,6 +41,15 @@ func TestReadAll(t *testing.T) {
 		}
 	})
 
+	t.Run("data-with-eof", func(t *testing.T) {
+		tt := TT{t}
+		b, err := ReadAll(iotest.DataErrReader(strings.NewReader("test")), 4)
+		tt.OK(err)
+		if string(b) != "test" {
+			t.Fatal(string(b), "!=", "test")
+		}
+	})
+
 	t.Run("empty-input", func(t *testing.T) {
 		tt := TT{t}
 		b, err := ReadAll(strings.NewReader(""), 0)
@@ -59,6 +70,41 @@ func TestReadAll(t *testing.T) {
 		_, err := ReadAll(strings.NewReader("test"), 3)
 		if !HasErrorCode(err, ErrIncompleteBody) {
 			t.Fatal("expected ErrIncompleteBody, found", err)
+		}
+	})
+
+	t.Run("bigger-than-first-allocation", func(t *testing.T) {
+		tt := TT{t}
+		in := strings.Repeat("0123456789", readAllPrealloc/4)
+		b, err := ReadAll(strings.NewReader(in), int64(len(in)))
+		tt.OK(err)
+		if string(b) != in {
+			t.Fatal("read back different data")
+		}
+		if cap(b) != len(in) {
+			t.Fatal("capacity", cap(b), "!=", len(in))
+		}
+	})
+
+	// The size usually comes from a request header, so must not be
+	// allocated before the data arrives.
+	t.Run("huge-declared-size", func(t *testing.T) {
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		_, err := ReadAll(strings.NewReader("test"), 1<<62)
+		runtime.ReadMemStats(&after)
+		if !HasErrorCode(err, ErrIncompleteBody) {
+			t.Fatal("expected ErrIncompleteBody, found", err)
+		}
+		if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 2*readAllPrealloc {
+			t.Fatal("allocated", allocated, "bytes for a 4 byte body")
+		}
+	})
+
+	t.Run("negative-size", func(t *testing.T) {
+		_, err := ReadAll(strings.NewReader("test"), -1)
+		if !HasErrorCode(err, ErrInvalidArgument) {
+			t.Fatal("expected ErrInvalidArgument, found", err)
 		}
 	})
 }
