@@ -64,6 +64,9 @@ const (
 
 	ErrInvalidURI ErrorCode = "InvalidURI"
 
+	// The request body was bigger than the maximum allowed.
+	ErrMaxMessageLengthExceeded ErrorCode = "MaxMessageLengthExceeded"
+
 	ErrMetadataTooLarge ErrorCode = "MetadataTooLarge"
 	ErrMethodNotAllowed ErrorCode = "MethodNotAllowed"
 	ErrMalformedXML     ErrorCode = "MalformedXML"
@@ -248,6 +251,7 @@ func (e ErrorCode) Status() int {
 		ErrInvalidToken,
 		ErrInvalidURI,
 		ErrKeyTooLong,
+		ErrMaxMessageLengthExceeded,
 		ErrMetadataTooLarge,
 		ErrMethodNotAllowed,
 		ErrMalformedPOSTRequest,

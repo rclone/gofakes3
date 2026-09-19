@@ -901,15 +901,8 @@ func (g *GoFakeS3) deleteMulti(bucket string, w http.ResponseWriter, r *http.Req
 	}
 
 	var in DeleteRequest
-
-	// The error from closing the request body is discarded - from go1.27
-	// Close returns io.EOF if the body was not read to EOF (eg when the
-	// body contains unread trailing headers), and a close error tells us
-	// nothing useful anyway as real I/O problems surface from Read.
-	defer func() { _ = r.Body.Close() }()
-	dc := xml.NewDecoder(r.Body)
-	if err := dc.Decode(&in); err != nil {
-		return ErrorMessage(ErrMalformedXML, err.Error())
+	if err := g.xmlDecodeBody(r.Body, &in); err != nil {
+		return err
 	}
 
 	keys := make([]string, len(in.Objects))
@@ -1284,11 +1277,16 @@ func (g *GoFakeS3) xmlEncoder(w http.ResponseWriter) *xml.Encoder {
 	return xe
 }
 
+// xmlDecodeBody decodes the XML request body in rdr into into, failing
+// with ErrMaxMessageLengthExceeded if it is bigger than MaxXMLBodySize.
 func (g *GoFakeS3) xmlDecodeBody(rdr io.ReadCloser, into interface{}) (err error) {
-	body, err := io.ReadAll(rdr)
+	body, err := io.ReadAll(io.LimitReader(rdr, MaxXMLBodySize+1))
 	defer CheckClose(rdr, &err)
 	if err != nil {
 		return err
+	}
+	if len(body) > MaxXMLBodySize {
+		return ErrMaxMessageLengthExceeded
 	}
 
 	if err := xml.Unmarshal(body, into); err != nil {
