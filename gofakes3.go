@@ -904,6 +904,9 @@ func (g *GoFakeS3) deleteMulti(bucket string, w http.ResponseWriter, r *http.Req
 	if err := g.xmlDecodeBody(r.Body, &in); err != nil {
 		return err
 	}
+	if len(in.Objects) > MaxDeleteObjects {
+		return ErrorMessagef(ErrMalformedXML, "a maximum of %d keys can be deleted in one request", MaxDeleteObjects)
+	}
 
 	keys := make([]string, len(in.Objects))
 	for i, o := range in.Objects {

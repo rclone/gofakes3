@@ -2,6 +2,7 @@ package gofakes3_test
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -63,4 +64,29 @@ func TestXMLBodyTooLarge(t *testing.T) {
 		res := ts.postXML("/"+defaultBucket+"/object", "uploadId="+uploadID, oversizedXML("CompleteMultipartUpload"))
 		ts.assertErrorResponse(res, gofakes3.ErrMaxMessageLengthExceeded)
 	})
+}
+
+// deleteXML returns a DeleteObjects body for n keys.
+func deleteXML(n int) []byte {
+	var b bytes.Buffer
+	b.WriteString("<Delete>")
+	for i := range n {
+		fmt.Fprintf(&b, "<Object><Key>key%d</Key></Object>", i)
+	}
+	b.WriteString("</Delete>")
+	return b.Bytes()
+}
+
+func TestDeleteMultiTooManyKeys(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	res := ts.postXML("/"+defaultBucket, "delete", deleteXML(gofakes3.MaxDeleteObjects+1))
+	ts.assertErrorResponse(res, gofakes3.ErrMalformedXML)
+
+	res = ts.postXML("/"+defaultBucket, "delete", deleteXML(gofakes3.MaxDeleteObjects))
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		ts.Fatal("bad status", res.StatusCode)
+	}
 }

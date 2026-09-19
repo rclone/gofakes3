@@ -42,6 +42,9 @@ const (
 	// From the docs: "Part numbers can be any number from 1 to 10,000, inclusive."
 	MaxUploadPartNumber = 10000
 
+	// From the docs: "The request can contain a list of up to 1,000 keys"
+	MaxDeleteObjects = 1000
+
 	// MaxXMLBodySize is the largest XML request body accepted, which is
 	// ample for the part list of a CompleteMultipartUpload with
 	// MaxUploadPartNumber parts or the key list of a DeleteObjects.
