@@ -43,7 +43,8 @@ var ErrMultipartUploadNotSupported = errors.New("gofakes3: multipart upload not 
 //     neither completes nor aborts (or whose Complete keeps failing) leaves the
 //     upload tracked indefinitely. Backends that persist part data should expose
 //     their own way to reap abandoned uploads rather than relying on GoFakeS3 to
-//     do so.
+//     do so, and then call GoFakeS3.ForgetMultipartUpload so GoFakeS3 releases
+//     its bookkeeping too.
 type MultipartBackend interface {
 	// CreateMultipartUpload begins a new multipart upload and returns the
 	// UploadID that subsequent UploadPart / CompleteMultipartUpload /

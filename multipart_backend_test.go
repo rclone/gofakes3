@@ -653,3 +653,47 @@ func TestMultipartBackend_EmptyUploadID(t *testing.T) {
 		t.Fatal("expected CreateMultipartUpload to fail on empty UploadID, got nil")
 	}
 }
+
+// TestMultipartBackend_ForgetMultipartUpload verifies that a streaming upload
+// the backend has discarded itself can be forgotten, so it no longer shows
+// in ListMultipartUploads.
+func TestMultipartBackend_ForgetMultipartUpload(t *testing.T) {
+	inner := s3mem.New()
+	be := newStreamingBackend(inner)
+	ts := newTestServer(t, withBackend(be))
+	defer ts.Close()
+
+	ctx := context.Background()
+	svc := ts.s3Client()
+
+	createOut, err := svc.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(defaultBucket),
+		Key:    aws.String("expired"),
+	})
+	if err != nil {
+		t.Fatalf("CreateMultipartUpload: %v", err)
+	}
+	uploadID := gofakes3.UploadID(*createOut.UploadId)
+
+	// The backend discards the upload itself, for example on expiry.
+	if err := be.AbortMultipartUpload(ctx, defaultBucket, "expired", uploadID); err != nil {
+		t.Fatalf("backend AbortMultipartUpload: %v", err)
+	}
+	if err := ts.ForgetMultipartUpload(defaultBucket, "expired", uploadID); err != nil {
+		t.Fatalf("ForgetMultipartUpload: %v", err)
+	}
+
+	listOut, err := svc.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
+		Bucket: aws.String(defaultBucket),
+	})
+	if err != nil {
+		t.Fatalf("ListMultipartUploads: %v", err)
+	}
+	if len(listOut.Uploads) != 0 {
+		t.Fatalf("forgotten upload still listed: %+v", listOut.Uploads)
+	}
+
+	if err := ts.ForgetMultipartUpload(defaultBucket, "expired", uploadID); !gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchUpload) {
+		t.Fatalf("expected NoSuchUpload forgetting twice, got %v", err)
+	}
+}

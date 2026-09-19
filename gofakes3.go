@@ -1115,6 +1115,16 @@ func (g *GoFakeS3) abortMultipartUpload(bucket, object string, uploadID UploadID
 	return nil
 }
 
+// ForgetMultipartUpload removes the record of the streaming multipart upload
+// uploadID which the MultipartBackend has already discarded itself - for
+// example because it expired - so it no longer shows in
+// ListMultipartUploads. It returns ErrNoSuchUpload if there is no such
+// upload.
+func (g *GoFakeS3) ForgetMultipartUpload(bucket, object string, uploadID UploadID) error {
+	_, err := g.uploader.Complete(bucket, object, uploadID)
+	return err
+}
+
 func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID UploadID, w http.ResponseWriter, r *http.Request) error {
 	g.log.Print(LogInfo, "complete multipart upload", bucket, object, uploadID)
 
