@@ -90,3 +90,12 @@ func TestDeleteMultiTooManyKeys(t *testing.T) {
 		ts.Fatal("bad status", res.StatusCode)
 	}
 }
+
+// TestCompleteMultipartUploadUnknownUpload checks that completing an upload
+// which doesn't exist fails before the request body is read.
+func TestCompleteMultipartUploadUnknownUpload(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	res := ts.postXML("/"+defaultBucket+"/object", "uploadId=missing", oversizedXML("CompleteMultipartUpload"))
+	ts.assertErrorResponse(res, gofakes3.ErrNoSuchUpload)
+}

@@ -1106,13 +1106,13 @@ func (g *GoFakeS3) abortMultipartUpload(bucket, object string, uploadID UploadID
 func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID UploadID, w http.ResponseWriter, r *http.Request) error {
 	g.log.Print(LogInfo, "complete multipart upload", bucket, object, uploadID)
 
-	var in CompleteMultipartUploadRequest
-	if err := g.xmlDecodeBody(r.Body, &in); err != nil {
+	upload, err := g.uploader.Get(bucket, object, uploadID)
+	if err != nil {
 		return err
 	}
 
-	upload, err := g.uploader.Get(bucket, object, uploadID)
-	if err != nil {
+	var in CompleteMultipartUploadRequest
+	if err := g.xmlDecodeBody(r.Body, &in); err != nil {
 		return err
 	}
 
