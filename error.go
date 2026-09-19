@@ -96,6 +96,10 @@ const (
 	ErrTooManyBuckets       ErrorCode = "TooManyBuckets"
 	ErrNotImplemented       ErrorCode = "NotImplemented"
 
+	// The server is overloaded, so the client should retry the request
+	// later, more slowly.
+	ErrSlowDown ErrorCode = "SlowDown"
+
 	ErrInternal ErrorCode = "InternalError"
 )
 
@@ -277,6 +281,9 @@ func (e ErrorCode) Status() int {
 
 	case ErrNotImplemented:
 		return http.StatusNotImplemented
+
+	case ErrSlowDown:
+		return http.StatusServiceUnavailable
 
 	case ErrNotModified:
 		return http.StatusNotModified

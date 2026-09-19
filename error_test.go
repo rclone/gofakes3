@@ -1,6 +1,7 @@
 package gofakes3
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -25,5 +26,11 @@ func TestErrorCustomResponseMarshalsAsExpected(t *testing.T) {
 
 	if string(out) != expected {
 		t.Fatalf("expected:\n%s\nfound:\n%s", expected, out)
+	}
+}
+
+func TestErrSlowDownStatus(t *testing.T) {
+	if status := ErrSlowDown.Status(); status != http.StatusServiceUnavailable {
+		t.Fatal("status", status, "!=", http.StatusServiceUnavailable)
 	}
 }
