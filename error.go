@@ -48,6 +48,9 @@ const (
 	// The Content-MD5 you specified is not valid.
 	ErrInvalidDigest ErrorCode = "InvalidDigest"
 
+	// The proposed upload exceeds the maximum allowed object size.
+	ErrEntityTooLarge ErrorCode = "EntityTooLarge"
+
 	ErrInvalidRange         ErrorCode = "InvalidRange"
 	ErrInvalidToken         ErrorCode = "InvalidToken"
 	ErrKeyTooLong           ErrorCode = "KeyTooLongError" // This is not a typo: Error is part of the string, but redundant in the constant name
@@ -239,6 +242,7 @@ func (e ErrorCode) Status() int {
 		return http.StatusConflict
 
 	case ErrBadDigest,
+		ErrEntityTooLarge,
 		ErrIllegalVersioningConfiguration,
 		ErrIncompleteBody,
 		ErrIncorrectNumberOfFilesInPostRequest,

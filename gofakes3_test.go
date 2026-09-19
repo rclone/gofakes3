@@ -838,6 +838,19 @@ func TestCreateObjectBrowserUpload(t *testing.T) {
 		ts.assertObject(defaultBucket, "yep", nil, "stuff")
 	})
 
+	t.Run("too-large", func(t *testing.T) {
+		ts := newTestServer(t)
+		defer ts.Close()
+		defer gofakes3.SetMaxPOSTBodySize(1024)()
+		var b bytes.Buffer
+		w := multipart.NewWriter(&b)
+		addFile(ts.TT, w, "big", bytes.Repeat([]byte("x"), 2048))
+		assertUploadFails(ts, defaultBucket, w, &b, gofakes3.ErrEntityTooLarge)
+		if ts.backendObjectExists(defaultBucket, "big") {
+			ts.Fatal("object was created")
+		}
+	})
+
 	t.Run("multiple-files-fails", func(t *testing.T) {
 		ts := newTestServer(t)
 		defer ts.Close()

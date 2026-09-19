@@ -623,6 +623,14 @@ func (g *GoFakeS3) headObject(
 	return nil
 }
 
+// maxPOSTBodySize is the largest browser upload body accepted: S3 allows
+// objects of up to 5 GB to be uploaded this way.
+var maxPOSTBodySize int64 = 5 * 1024 * 1024 * 1024
+
+// postFileMemory is how much of a browser upload's file is held in memory
+// before the rest is spooled to a temporary file.
+const postFileMemory = 1024 * 1024
+
 // createObjectBrowserUpload allows objects to be created from a multipart upload initiated
 // by a browser form.
 func (g *GoFakeS3) createObjectBrowserUpload(bucket string, w http.ResponseWriter, r *http.Request) (err error) {
@@ -632,8 +640,12 @@ func (g *GoFakeS3) createObjectBrowserUpload(bucket string, w http.ResponseWrite
 		return err
 	}
 
-	const _24MB = (1 << 20) * 24 // maximum amount of memory before temp files are used
-	if err := r.ParseMultipartForm(_24MB); nil != err {
+	r.Body = http.MaxBytesReader(w, r.Body, maxPOSTBodySize)
+	if err := r.ParseMultipartForm(postFileMemory); nil != err {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return ErrEntityTooLarge
+		}
 		return ErrMalformedPOSTRequest
 	}
 
