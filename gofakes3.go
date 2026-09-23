@@ -2,6 +2,7 @@ package gofakes3
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -40,6 +41,7 @@ type GoFakeS3 struct {
 	hostBucket              bool
 	autoBucket              bool
 	uploader                *uploader
+	uploadOwner             func(ctx context.Context) string // nil if uploads aren't private
 	log                     Logger
 
 	// simple v4 signature
@@ -953,7 +955,7 @@ func (g *GoFakeS3) initiateMultipartUpload(bucket, object string, w http.Respons
 		id, err := g.multipart.CreateMultipartUpload(r.Context(), bucket, object, meta)
 		switch {
 		case err == nil:
-			if _, err := g.uploader.BeginStreaming(id, bucket, object, meta, g.timeSource.Now()); err != nil {
+			if _, err := g.uploader.BeginStreaming(g.owner(r.Context()), id, bucket, object, meta, g.timeSource.Now()); err != nil {
 				// Backend returned a colliding UploadID. Tell it to drop
 				// the upload it just created so we do not leak state.
 				_ = g.multipart.AbortMultipartUpload(r.Context(), bucket, object, id)
@@ -967,7 +969,7 @@ func (g *GoFakeS3) initiateMultipartUpload(bucket, object string, w http.Respons
 		}
 	}
 	if uploadID == "" {
-		upload := g.uploader.Begin(bucket, object, meta, g.timeSource.Now())
+		upload := g.uploader.Begin(g.owner(r.Context()), bucket, object, meta, g.timeSource.Now())
 		uploadID = upload.ID
 	}
 
@@ -999,7 +1001,7 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 		return ErrMissingContentLength
 	}
 
-	upload, err := g.uploader.Get(bucket, object, uploadID)
+	upload, err := g.uploader.Get(g.owner(r.Context()), bucket, object, uploadID)
 	if err != nil {
 		// FIXME: What happens with S3 when you abort a multipart upload while
 		// part uploads are still in progress? In this case, we will retain the
@@ -1097,7 +1099,7 @@ func isChunkedStreamingPayload(value string) bool {
 
 func (g *GoFakeS3) abortMultipartUpload(bucket, object string, uploadID UploadID, w http.ResponseWriter, r *http.Request) error {
 	g.log.Print(LogInfo, "abort multipart upload", bucket, object, uploadID)
-	upload, err := g.uploader.Get(bucket, object, uploadID)
+	upload, err := g.uploader.Get(g.owner(r.Context()), bucket, object, uploadID)
 	if err != nil {
 		return err
 	}
@@ -1108,7 +1110,7 @@ func (g *GoFakeS3) abortMultipartUpload(bucket, object string, uploadID UploadID
 	}
 	// Consume from the uploader only after the backend has acknowledged the
 	// abort, so a backend error leaves the upload available for retry.
-	if _, err := g.uploader.Complete(bucket, object, uploadID); err != nil {
+	if _, err := g.uploader.Complete(g.owner(r.Context()), bucket, object, uploadID); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1120,15 +1122,26 @@ func (g *GoFakeS3) abortMultipartUpload(bucket, object string, uploadID UploadID
 // example because it expired - so it no longer shows in
 // ListMultipartUploads. It returns ErrNoSuchUpload if there is no such
 // upload.
-func (g *GoFakeS3) ForgetMultipartUpload(bucket, object string, uploadID UploadID) error {
-	_, err := g.uploader.Complete(bucket, object, uploadID)
+//
+// With WithUploadOwner, ctx must give the owner of the upload.
+func (g *GoFakeS3) ForgetMultipartUpload(ctx context.Context, bucket, object string, uploadID UploadID) error {
+	_, err := g.uploader.Complete(g.owner(ctx), bucket, object, uploadID)
 	return err
+}
+
+// owner returns the owner of the multipart uploads made by a request
+// with ctx - see WithUploadOwner.
+func (g *GoFakeS3) owner(ctx context.Context) string {
+	if g.uploadOwner == nil {
+		return ""
+	}
+	return g.uploadOwner(ctx)
 }
 
 func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID UploadID, w http.ResponseWriter, r *http.Request) error {
 	g.log.Print(LogInfo, "complete multipart upload", bucket, object, uploadID)
 
-	upload, err := g.uploader.Get(bucket, object, uploadID)
+	upload, err := g.uploader.Get(g.owner(r.Context()), bucket, object, uploadID)
 	if err != nil {
 		return err
 	}
@@ -1145,7 +1158,7 @@ func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID Uploa
 		}
 		// Consume from the uploader only after the backend has acknowledged
 		// completion, so a backend error leaves the upload available for retry.
-		if _, err := g.uploader.Complete(bucket, object, uploadID); err != nil {
+		if _, err := g.uploader.Complete(g.owner(r.Context()), bucket, object, uploadID); err != nil {
 			return err
 		}
 		if versionID != "" {
@@ -1168,7 +1181,7 @@ func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID Uploa
 		return err
 	}
 	// Consume from the uploader only after PutObject has succeeded.
-	if _, err := g.uploader.Complete(bucket, object, uploadID); err != nil {
+	if _, err := g.uploader.Complete(g.owner(r.Context()), bucket, object, uploadID); err != nil {
 		return err
 	}
 	if result.VersionID != "" {
@@ -1199,7 +1212,7 @@ func (g *GoFakeS3) listMultipartUploads(bucket string, w http.ResponseWriter, r 
 		maxUploads = DefaultMaxUploads
 	}
 
-	out, err := g.uploader.List(bucket, marker, prefix, maxUploads)
+	out, err := g.uploader.List(g.owner(r.Context()), bucket, marker, prefix, maxUploads)
 	if err != nil {
 		return err
 	}
@@ -1224,7 +1237,7 @@ func (g *GoFakeS3) listMultipartUploadParts(bucket, object string, uploadID Uplo
 		return ErrInvalidURI
 	}
 
-	out, err := g.uploader.ListParts(bucket, object, uploadID, int(marker), maxParts)
+	out, err := g.uploader.ListParts(g.owner(r.Context()), bucket, object, uploadID, int(marker), maxParts)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,9 @@
 package gofakes3
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type Option func(g *GoFakeS3)
 
@@ -88,4 +91,16 @@ func WithUnimplementedPageError() Option {
 // rather than returning ErrNoSuchBucket.
 func WithAutoBucket(enabled bool) Option {
 	return func(g *GoFakeS3) { g.autoBucket = true }
+}
+
+// WithUploadOwner makes multipart uploads private to their owner, which
+// owner returns from the context of each request. To any other owner
+// an upload doesn't exist: it isn't listed and can't be added to,
+// completed or aborted.
+//
+// Use this when one instance serves users who must not see or use each
+// other's uploads, for example when the Backend maps each user to
+// different storage.
+func WithUploadOwner(owner func(ctx context.Context) string) Option {
+	return func(g *GoFakeS3) { g.uploadOwner = owner }
 }

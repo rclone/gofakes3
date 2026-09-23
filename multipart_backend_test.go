@@ -679,7 +679,7 @@ func TestMultipartBackend_ForgetMultipartUpload(t *testing.T) {
 	if err := be.AbortMultipartUpload(ctx, defaultBucket, "expired", uploadID); err != nil {
 		t.Fatalf("backend AbortMultipartUpload: %v", err)
 	}
-	if err := ts.ForgetMultipartUpload(defaultBucket, "expired", uploadID); err != nil {
+	if err := ts.ForgetMultipartUpload(ctx, defaultBucket, "expired", uploadID); err != nil {
 		t.Fatalf("ForgetMultipartUpload: %v", err)
 	}
 
@@ -693,7 +693,7 @@ func TestMultipartBackend_ForgetMultipartUpload(t *testing.T) {
 		t.Fatalf("forgotten upload still listed: %+v", listOut.Uploads)
 	}
 
-	if err := ts.ForgetMultipartUpload(defaultBucket, "expired", uploadID); !gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchUpload) {
+	if err := ts.ForgetMultipartUpload(ctx, defaultBucket, "expired", uploadID); !gofakes3.HasErrorCode(err, gofakes3.ErrNoSuchUpload) {
 		t.Fatalf("expected NoSuchUpload forgetting twice, got %v", err)
 	}
 }

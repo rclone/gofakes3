@@ -148,18 +148,27 @@ type uploader struct {
 	// expected to ever generate 4.2 billion of these but who are we to judge?)
 	uploadID *big.Int
 
-	buckets map[string]*bucketUploads
+	buckets map[uploadBucket]*bucketUploads
 	mu      sync.Mutex
+}
+
+// uploadBucket identifies the uploads of one owner to one bucket.
+//
+// Uploads are private to their owner: every other owner sees a bucket
+// with none.
+type uploadBucket struct {
+	owner  string
+	bucket string
 }
 
 func newUploader() *uploader {
 	return &uploader{
-		buckets:  make(map[string]*bucketUploads),
+		buckets:  make(map[uploadBucket]*bucketUploads),
 		uploadID: new(big.Int),
 	}
 }
 
-func (u *uploader) Begin(bucket, object string, meta map[string]string, initiated time.Time) *multipartUpload {
+func (u *uploader) Begin(owner, bucket, object string, meta map[string]string, initiated time.Time) *multipartUpload {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
@@ -174,10 +183,11 @@ func (u *uploader) Begin(bucket, object string, meta map[string]string, initiate
 	}
 
 	// FIXME: make sure the uploader responds to DeleteBucket
-	bucketUploads := u.buckets[bucket]
+	key := uploadBucket{owner: owner, bucket: bucket}
+	bucketUploads := u.buckets[key]
 	if bucketUploads == nil {
-		u.buckets[bucket] = newBucketUploads()
-		bucketUploads = u.buckets[bucket]
+		bucketUploads = newBucketUploads()
+		u.buckets[key] = bucketUploads
 	}
 
 	bucketUploads.add(mpu)
@@ -194,7 +204,7 @@ func (u *uploader) Begin(bucket, object string, meta map[string]string, initiate
 // BeginStreaming returns an error if uploadID is empty or collides
 // with one already being tracked: backends must hand out IDs that are
 // unique for the lifetime of the GoFakeS3 instance.
-func (u *uploader) BeginStreaming(uploadID UploadID, bucket, object string, meta map[string]string, initiated time.Time) (*multipartUpload, error) {
+func (u *uploader) BeginStreaming(owner string, uploadID UploadID, bucket, object string, meta map[string]string, initiated time.Time) (*multipartUpload, error) {
 	if uploadID == "" {
 		return nil, fmt.Errorf("gofakes3: MultipartBackend returned an empty UploadID for bucket %q", bucket)
 	}
@@ -202,7 +212,8 @@ func (u *uploader) BeginStreaming(uploadID UploadID, bucket, object string, meta
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	if bu := u.buckets[bucket]; bu != nil {
+	key := uploadBucket{owner: owner, bucket: bucket}
+	if bu := u.buckets[key]; bu != nil {
 		if _, exists := bu.uploads[uploadID]; exists {
 			return nil, fmt.Errorf("gofakes3: MultipartBackend returned duplicate UploadID %q for bucket %q", uploadID, bucket)
 		}
@@ -217,10 +228,10 @@ func (u *uploader) BeginStreaming(uploadID UploadID, bucket, object string, meta
 		streaming: true,
 	}
 
-	bucketUploads := u.buckets[bucket]
+	bucketUploads := u.buckets[key]
 	if bucketUploads == nil {
-		u.buckets[bucket] = newBucketUploads()
-		bucketUploads = u.buckets[bucket]
+		bucketUploads = newBucketUploads()
+		u.buckets[key] = bucketUploads
 	}
 
 	bucketUploads.add(mpu)
@@ -228,11 +239,11 @@ func (u *uploader) BeginStreaming(uploadID UploadID, bucket, object string, meta
 	return mpu, nil
 }
 
-func (u *uploader) ListParts(bucket, object string, uploadID UploadID, marker int, limit int64) (*ListMultipartUploadPartsResult, error) {
+func (u *uploader) ListParts(owner, bucket, object string, uploadID UploadID, marker int, limit int64) (*ListMultipartUploadPartsResult, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	mpu, err := u.getUnlocked(bucket, object, uploadID)
+	mpu, err := u.getUnlocked(owner, bucket, object, uploadID)
 	if err != nil {
 		return nil, err
 	}
@@ -275,11 +286,11 @@ func (u *uploader) ListParts(bucket, object string, uploadID UploadID, marker in
 	return &result, nil
 }
 
-func (u *uploader) List(bucket string, marker *UploadListMarker, prefix Prefix, limit int64) (*ListMultipartUploadsResult, error) {
+func (u *uploader) List(owner, bucket string, marker *UploadListMarker, prefix Prefix, limit int64) (*ListMultipartUploadsResult, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	bucketUploads, ok := u.buckets[bucket]
+	bucketUploads, ok := u.buckets[uploadBucket{owner: owner, bucket: bucket}]
 	if !ok {
 		return nil, ErrNoSuchUpload
 	}
@@ -388,28 +399,28 @@ done:
 	return &result, nil
 }
 
-func (u *uploader) Complete(bucket, object string, id UploadID) (*multipartUpload, error) {
+func (u *uploader) Complete(owner, bucket, object string, id UploadID) (*multipartUpload, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	up, err := u.getUnlocked(bucket, object, id)
+	up, err := u.getUnlocked(owner, bucket, object, id)
 	if err != nil {
 		return nil, err
 	}
 
 	// if getUnlocked succeeded, so will this:
-	u.buckets[bucket].remove(id)
+	u.buckets[uploadBucket{owner: owner, bucket: bucket}].remove(id)
 
 	return up, nil
 }
 
-func (u *uploader) Get(bucket, object string, id UploadID) (mu *multipartUpload, err error) {
+func (u *uploader) Get(owner, bucket, object string, id UploadID) (mu *multipartUpload, err error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.getUnlocked(bucket, object, id)
+	return u.getUnlocked(owner, bucket, object, id)
 }
 
-func (u *uploader) getUnlocked(bucket, object string, id UploadID) (mu *multipartUpload, err error) {
-	bucketUps, ok := u.buckets[bucket]
+func (u *uploader) getUnlocked(owner, bucket, object string, id UploadID) (mu *multipartUpload, err error) {
+	bucketUps, ok := u.buckets[uploadBucket{owner: owner, bucket: bucket}]
 	if !ok {
 		return nil, ErrNoSuchUpload
 	}
