@@ -3,6 +3,7 @@ package gofakes3
 import (
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,5 +179,35 @@ func TestCopyObjectResult(t *testing.T) {
 	}
 	if string(out) != expected {
 		t.Fatalf("unexpected XML output: %s", string(out))
+	}
+}
+
+func TestListMultipartUploadPartsResultIsTruncated(t *testing.T) {
+	res := ListMultipartUploadPartsResult{
+		Bucket:      "mybucket",
+		Key:         "mykey",
+		UploadID:    "upload123",
+		IsTruncated: false,
+	}
+	out, err := xml.Marshal(&res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "<IsTruncated>false</IsTruncated>") {
+		t.Fatalf("expected <IsTruncated>false</IsTruncated> in XML, got: %s", string(out))
+	}
+}
+
+func TestListMultipartUploadsResultIsTruncated(t *testing.T) {
+	res := ListMultipartUploadsResult{
+		Bucket:      "mybucket",
+		IsTruncated: false,
+	}
+	out, err := xml.Marshal(&res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "<IsTruncated>false</IsTruncated>") {
+		t.Fatalf("expected <IsTruncated>false</IsTruncated> in XML, got: %s", string(out))
 	}
 }
