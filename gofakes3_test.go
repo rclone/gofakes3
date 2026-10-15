@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -15,7 +16,9 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	xml "github.com/minio/xxml"
@@ -1585,5 +1588,97 @@ func TestObjectMetadataHeaders(t *testing.T) {
 		if strings.Contains(head, notWant) {
 			t.Errorf("HEAD response contains %q:\n%s", notWant, head)
 		}
+	}
+}
+
+// failingReadBackend returns objects whose contents fail part way.
+type failingReadBackend struct {
+	*s3mem.Backend
+}
+
+func (b *failingReadBackend) GetObject(ctx context.Context, bucketName, objectName string, rangeRequest *gofakes3.ObjectRangeRequest) (*gofakes3.Object, error) {
+	obj, err := b.Backend.GetObject(ctx, bucketName, objectName, rangeRequest)
+	if err == nil {
+		obj.Contents = io.NopCloser(io.MultiReader(io.LimitReader(obj.Contents, 2), iotest.ErrReader(errors.New("read failed"))))
+	}
+	return obj, err
+}
+
+// errorLogger records the errors logged.
+type errorLogger struct {
+	mu     sync.Mutex
+	errors []string
+}
+
+func (l *errorLogger) Print(level gofakes3.LogLevel, v ...interface{}) {
+	if level == gofakes3.LogErr {
+		l.mu.Lock()
+		l.errors = append(l.errors, fmt.Sprint(v...))
+		l.mu.Unlock()
+	}
+}
+
+// TestGetObjectReadFailure checks a GET whose object fails to read
+// after the response has started gives a short body, without trying to
+// send an error response.
+func TestGetObjectReadFailure(t *testing.T) {
+	logger := &errorLogger{}
+	ts := newTestServer(t, withBackend(&failingReadBackend{s3mem.New()}), withFakerOptions(gofakes3.WithLogger(logger)))
+	defer ts.Close()
+	ts.backendPutString(defaultBucket, "object", nil, "hello")
+
+	rs, err := httpClient().Get(ts.url("/" + defaultBucket + "/object"))
+	ts.OK(err)
+	defer func() { _ = rs.Body.Close() }()
+	if rs.StatusCode != http.StatusOK {
+		t.Fatal("expected status 200, got", rs.StatusCode)
+	}
+	body, err := io.ReadAll(rs.Body)
+	if err == nil || string(body) != "he" {
+		t.Fatalf("expected short body and error, got %q, %v", body, err)
+	}
+	logger.mu.Lock()
+	defer logger.mu.Unlock()
+	if len(logger.errors) != 0 {
+		t.Fatalf("unexpected errors logged: %q", logger.errors)
+	}
+}
+
+// failingCloseBackend returns objects whose contents fail to close.
+type failingCloseBackend struct {
+	*s3mem.Backend
+}
+
+// failingCloser is a reader whose Close fails.
+type failingCloser struct {
+	io.Reader
+}
+
+func (failingCloser) Close() error { return errors.New("close failed") }
+
+func (b *failingCloseBackend) GetObject(ctx context.Context, bucketName, objectName string, rangeRequest *gofakes3.ObjectRangeRequest) (*gofakes3.Object, error) {
+	obj, err := b.Backend.GetObject(ctx, bucketName, objectName, rangeRequest)
+	if err == nil {
+		obj.Contents = failingCloser{obj.Contents}
+	}
+	return obj, err
+}
+
+// TestGetObjectCloseFailure checks a GET whose object fails to close
+// after the response has been sent doesn't try to send an error
+// response after it.
+func TestGetObjectCloseFailure(t *testing.T) {
+	backend := &failingCloseBackend{s3mem.New()}
+	if err := backend.CreateBucket(context.Background(), defaultBucket); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.PutObject(context.Background(), defaultBucket, "object", nil, strings.NewReader("hello"), 5); err != nil {
+		t.Fatal(err)
+	}
+	faker := gofakes3.New(backend, gofakes3.WithLogger(&errorLogger{}))
+	rec := httptest.NewRecorder()
+	faker.Server().ServeHTTP(rec, httptest.NewRequest("GET", "/"+defaultBucket+"/object", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "hello" {
+		t.Fatalf("expected status 200 and body %q, got %d and %q", "hello", rec.Code, rec.Body.String())
 	}
 }

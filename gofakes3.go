@@ -657,9 +657,8 @@ func (g *GoFakeS3) getObject(
 		g.log.Print(LogErr, "unexpected nil object for key", bucket, object)
 		return ErrInternal
 	}
-	defer CheckClose(obj.Contents, &err)
-
 	if err := g.writeGetOrHeadObjectResponse(obj, w, r); err != nil {
+		_ = obj.Contents.Close()
 		return err
 	}
 	if partsCount > 0 {
@@ -670,9 +669,14 @@ func (g *GoFakeS3) getObject(
 	obj.Range.writeHeader(obj.Size, w)
 
 	if _, err := io.Copy(w, obj.Contents); err != nil {
-		return err
+		// The response has started so the error can't be sent. The
+		// client sees a short body, as usually it has gone away.
+		g.log.Print(LogInfo, "GET OBJECT", bucket, object, "failed:", err)
 	}
-
+	// Nor can an error closing the object be sent
+	if err := obj.Contents.Close(); err != nil {
+		g.log.Print(LogErr, "GET OBJECT", bucket, object, "close failed:", err)
+	}
 	return nil
 }
 
