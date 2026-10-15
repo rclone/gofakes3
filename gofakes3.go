@@ -573,6 +573,13 @@ func (g *GoFakeS3) getObject(
 	if err != nil {
 		return err
 	}
+	part, partsCount, err := g.objectPart(r, bucket, object)
+	if err != nil {
+		return err
+	}
+	if part != nil {
+		rnge = part
+	}
 
 	var obj *Object
 
@@ -601,6 +608,9 @@ func (g *GoFakeS3) getObject(
 
 	if err := g.writeGetOrHeadObjectResponse(obj, w, r); err != nil {
 		return err
+	}
+	if partsCount > 0 {
+		w.Header().Set("x-amz-mp-parts-count", strconv.Itoa(partsCount))
 	}
 
 	// Writes Content-Length, and Content-Range if applicable:
@@ -697,6 +707,11 @@ func (g *GoFakeS3) headObject(
 		return err
 	}
 
+	part, partsCount, err := g.objectPart(r, bucket, object)
+	if err != nil {
+		return err
+	}
+
 	obj, err := g.storage.HeadObject(r.Context(), bucket, object)
 	if err != nil {
 		return err
@@ -711,6 +726,13 @@ func (g *GoFakeS3) headObject(
 		return err
 	}
 
+	if part != nil {
+		w.Header().Set("x-amz-mp-parts-count", strconv.Itoa(partsCount))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", part.Start, part.End, obj.Size))
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", part.End-part.Start+1))
+		w.WriteHeader(http.StatusPartialContent)
+		return nil
+	}
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", obj.Size))
 
 	return nil

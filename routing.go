@@ -75,6 +75,9 @@ func (g *GoFakeS3) routeBase(w http.ResponseWriter, r *http.Request) {
 func (g *GoFakeS3) routeObject(bucket, object string, w http.ResponseWriter, r *http.Request) (err error) {
 	switch r.Method {
 	case "GET":
+		if _, ok := r.URL.Query()["attributes"]; ok {
+			return g.getObjectAttributes(bucket, object, w, r)
+		}
 		return g.getObject(bucket, object, "", w, r)
 	case "HEAD":
 		return g.headObject(bucket, object, "", w, r)
@@ -191,7 +194,6 @@ var unsupportedSubresources = []string{
 	"accelerate",
 	"acl",
 	"analytics",
-	"attributes",
 	"cors",
 	"encryption",
 	"intelligent-tiering",

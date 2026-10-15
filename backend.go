@@ -27,6 +27,11 @@ type Object struct {
 	// If versioning is enabled for the bucket, this is true if this object version
 	// is a delete marker.
 	IsDeleteMarker bool
+
+	// PartSizes are the sizes of the parts of an object made by a
+	// multipart upload, in order, if the backend knows them. They are
+	// used for GET and HEAD with partNumber and GetObjectAttributes.
+	PartSizes []int64
 }
 
 type ObjectList struct {
