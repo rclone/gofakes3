@@ -14,6 +14,13 @@ type Storage struct {
 	Xmlns   string    `xml:"xmlns,attr"`
 	Owner   *UserInfo `xml:"Owner,omitempty"`
 	Buckets Buckets   `xml:"Buckets>Bucket"`
+
+	// ContinuationToken is set if there are more buckets to list
+	// after these, and is passed to get them.
+	ContinuationToken string `xml:"ContinuationToken,omitempty"`
+
+	// Prefix is the prefix the bucket names were limited to, if any.
+	Prefix string `xml:"Prefix,omitempty"`
 }
 
 type UserInfo struct {
@@ -237,8 +244,8 @@ type ListBucketResultV2 struct {
 	ListBucketResultBase
 
 	// If ContinuationToken was sent with the request, it is included in the
-	// response.
-	ContinuationToken string `xml:"ContinuationToken,omitempty"`
+	// response, even if it is empty.
+	ContinuationToken *string `xml:"ContinuationToken,omitempty"`
 
 	// Returns the number of keys included in the response. The value is always
 	// less than or equal to the MaxKeys value.

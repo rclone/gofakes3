@@ -16,53 +16,25 @@ func shouldEscape(c byte) bool {
 	return true
 }
 
-// s3URLEncode is based on Golang's url.QueryEscape() code,
-// while considering some S3 exceptions:
-//   - Avoid encoding '/' and '*'
-//   - Force encoding of '~'
+// URLEncode encodes s for a listing with encoding-type=url, as S3
+// does. This is like Go's url.QueryEscape() except that '/' and '*'
+// aren't encoded, '~' is, and ' ' is encoded as %20 not '+'.
 func URLEncode(s string) string {
-	spaceCount, hexCount := 0, 0
+	hexCount := 0
 	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if shouldEscape(c) {
-			if c == ' ' {
-				spaceCount++
-			} else {
-				hexCount++
-			}
+		if shouldEscape(s[i]) {
+			hexCount++
 		}
-	}
-
-	if spaceCount == 0 && hexCount == 0 {
-		return s
-	}
-
-	var buf [64]byte
-	var t []byte
-
-	required := len(s) + 2*hexCount
-	if required <= len(buf) {
-		t = buf[:required]
-	} else {
-		t = make([]byte, required)
 	}
 
 	if hexCount == 0 {
-		copy(t, s)
-		for i := 0; i < len(s); i++ {
-			if s[i] == ' ' {
-				t[i] = '+'
-			}
-		}
-		return string(t)
+		return s
 	}
 
+	t := make([]byte, len(s)+2*hexCount)
 	j := 0
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
-		case c == ' ':
-			t[j] = '+'
-			j++
 		case shouldEscape(c):
 			t[j] = '%'
 			t[j+1] = "0123456789ABCDEF"[c>>4]

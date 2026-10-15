@@ -36,6 +36,9 @@ const (
 	MaxBucketKeys        = 1000
 	DefaultMaxBucketKeys = 1000
 
+	// MaxBucketsLimit is the most buckets ListBuckets returns at once.
+	MaxBucketsLimit = 10000
+
 	MaxBucketVersionKeys        = 1000
 	DefaultMaxBucketVersionKeys = 1000
 

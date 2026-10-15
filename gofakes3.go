@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -236,19 +237,52 @@ func (g *GoFakeS3) httpError(w http.ResponseWriter, r *http.Request, err error) 
 	}
 }
 
+// defaultOwner is the owner of all buckets and objects.
+var defaultOwner = UserInfo{
+	ID:          "fe7272ea58be830e56fe1663b10fafef",
+	DisplayName: "GoFakeS3",
+}
+
+// listBuckets lists the buckets, paginated by the max-buckets and
+// continuation-token parameters and limited to those starting with
+// the prefix parameter.
 func (g *GoFakeS3) listBuckets(w http.ResponseWriter, r *http.Request) error {
+	q := r.URL.Query()
+	maxBuckets, err := parseClampedInt(q.Get("max-buckets"), MaxBucketsLimit, 1, MaxBucketsLimit)
+	if err != nil {
+		return ErrorInvalidArgument("max-buckets", q.Get("max-buckets"), "max-buckets must be between 1 and 10000")
+	}
+	prefix := q.Get("prefix")
+	after := ""
+	if token := q.Get("continuation-token"); token != "" {
+		decoded, err := base64.URLEncoding.DecodeString(token)
+		if err != nil {
+			return ErrorInvalidArgument("continuation-token", token, "The continuation token provided is incorrect")
+		}
+		after = string(decoded)
+	}
+
 	buckets, err := g.storage.ListBuckets(r.Context())
 	if err != nil {
 		return err
 	}
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Name < buckets[j].Name })
 
 	s := &Storage{
-		Xmlns:   "http://s3.amazonaws.com/doc/2006-03-01/",
-		Buckets: buckets,
-		Owner: &UserInfo{
-			ID:          "fe7272ea58be830e56fe1663b10fafef",
-			DisplayName: "GoFakeS3",
-		},
+		Xmlns:  "http://s3.amazonaws.com/doc/2006-03-01/",
+		Owner:  &defaultOwner,
+		Prefix: prefix,
+	}
+	for _, bucket := range buckets {
+		if bucket.Name <= after || !strings.HasPrefix(bucket.Name, prefix) {
+			continue
+		}
+		if int64(len(s.Buckets)) == maxBuckets {
+			last := s.Buckets[len(s.Buckets)-1].Name
+			s.ContinuationToken = base64.URLEncoding.EncodeToString([]byte(last))
+			break
+		}
+		s.Buckets = append(s.Buckets, bucket)
 	}
 
 	return g.xmlEncoder(w).Encode(s)
@@ -289,7 +323,14 @@ func (g *GoFakeS3) listBucket(bucketName string, w http.ResponseWriter, r *http.
 	g.log.Print(LogInfo, "bucketname:", bucketName, "prefix:", prefix, "page:", fmt.Sprintf("%+v", page))
 
 	ctx := r.Context()
-	objects, err := g.storage.ListBucket(ctx, bucketName, &prefix, page)
+	var objects *ObjectList
+	if page.MaxKeys == 0 {
+		// Asking for no keys gets none, without asking the backend
+		// which treats 0 as unlimited
+		objects = NewObjectList()
+	} else {
+		objects, err = g.storage.ListBucket(ctx, bucketName, &prefix, page)
+	}
 	if err != nil {
 		if err == ErrInternalPageNotImplemented && !g.failOnUnimplementedPage {
 			// We have observed (though not yet confirmed) that simple clients
@@ -309,6 +350,16 @@ func (g *GoFakeS3) listBucket(bucketName string, w http.ResponseWriter, r *http.
 		}
 	}
 
+	// V1 listings always have the owner, V2 only if asked for
+	withOwner := !isVersion2 || q.Get("fetch-owner") == "true"
+	for _, content := range objects.Contents {
+		if !withOwner {
+			content.Owner = nil
+		} else if content.Owner == nil {
+			content.Owner = &defaultOwner
+		}
+	}
+
 	base := ListBucketResultBase{
 		Xmlns:          "http://s3.amazonaws.com/doc/2006-03-01/",
 		Name:           bucketName,
@@ -321,7 +372,11 @@ func (g *GoFakeS3) listBucket(bucketName string, w http.ResponseWriter, r *http.
 		EncodingType:   encodingType,
 	}
 	if useUrlEncoding {
-		base.Prefix = URLEncode(base.Prefix)
+		// S3 encodes the Prefix of V2 listings but not V1
+		if isVersion2 {
+			base.Prefix = URLEncode(base.Prefix)
+		}
+		base.Delimiter = URLEncode(base.Delimiter)
 		for i := range base.CommonPrefixes {
 			prefix := &base.CommonPrefixes[i]
 			prefix.Prefix = URLEncode(prefix.Prefix)
@@ -330,17 +385,23 @@ func (g *GoFakeS3) listBucket(bucketName string, w http.ResponseWriter, r *http.
 			content.Key = URLEncode(content.Key)
 		}
 	}
+	encode := func(s string) string {
+		if useUrlEncoding {
+			return URLEncode(s)
+		}
+		return s
+	}
 
 	if !isVersion2 {
 		var result = &ListBucketResult{
 			ListBucketResultBase: base,
-			Marker:               page.Marker,
+			Marker:               encode(page.Marker),
 		}
 		if base.Delimiter != "" {
 			// From the S3 docs: "This element is returned only if you specify
 			// a delimiter request parameter." Dunno why. This hack has been moved
 			// into GoFakeS3 to spare backend implementers the trouble.
-			result.NextMarker = objects.NextMarker
+			result.NextMarker = encode(objects.NextMarker)
 		}
 		return g.xmlEncoder(w).Encode(result)
 
@@ -348,32 +409,17 @@ func (g *GoFakeS3) listBucket(bucketName string, w http.ResponseWriter, r *http.
 		var result = &ListBucketResultV2{
 			ListBucketResultBase: base,
 			KeyCount:             int64(len(objects.CommonPrefixes) + len(objects.Contents)),
-			StartAfter:           q.Get("start-after"),
-			ContinuationToken:    q.Get("continuation-token"),
+			StartAfter:           encode(q.Get("start-after")),
+		}
+		if _, ok := q["continuation-token"]; ok {
+			token := q.Get("continuation-token")
+			result.ContinuationToken = &token
 		}
 		if objects.NextMarker != "" {
 			// We are just cheating with these continuation tokens; they're just the NextMarker
 			// from v1 in disguise! That may change at any time and should not be relied upon
 			// though.
 			result.NextContinuationToken = base64.URLEncoding.EncodeToString([]byte(objects.NextMarker))
-		}
-
-		// On the topic of "fetch-owner", the AWS docs say, in typically vague style:
-		// "If you want the owner information in the response, you can specify
-		// this parameter with the value set to true."
-		//
-		// What does the bare word 'true' mean when we're talking about a query
-		// string parameter, which can only be a string? Does it mean the word
-		// 'true'? Does it mean 'any truthy string'? Does it mean only the key
-		// needs to be present (i.e. '?fetch-owner'), which we are assuming
-		// for now? This is why you need proper technical writers.
-		//
-		// Probably need to hit up the s3assumer at some point, but until then, here's
-		// another FIXME!
-		if _, ok := q["fetch-owner"]; !ok {
-			for _, v := range result.Contents {
-				v.Owner = nil
-			}
 		}
 
 		return g.xmlEncoder(w).Encode(result)
