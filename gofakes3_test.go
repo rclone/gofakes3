@@ -1539,7 +1539,7 @@ func TestObjectMetadataHeaders(t *testing.T) {
 		"Cache-Control":                "no-cache",
 		"Expires":                      "Thu, 01 Dec 2094 16:00:00 GMT",
 		"X-Amz-Server-Side-Encryption": "AES256",
-		"X-Amz-Checksum-Crc32":         "AAAAAA==",
+		"X-Amz-Checksum-Crc32":         "NhCmhg==", // crc32("hello")
 		"X-Amz-Tagging":                "k=v",
 	} {
 		rq.Header.Set(k, v)

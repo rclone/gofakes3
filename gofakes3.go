@@ -658,6 +658,18 @@ func (g *GoFakeS3) writeGetOrHeadObjectResponse(obj *Object, w http.ResponseWrit
 		return err
 	}
 
+	// Checksums are only returned when asked for, and only for the
+	// whole object. They mustn't be returned with an error, such as
+	// for a failed condition, as clients check the error body
+	// against them.
+	if strings.EqualFold(r.Header.Get("X-Amz-Checksum-Mode"), "ENABLED") && obj.Range == nil && r.Header.Get("Range") == "" && r.URL.Query().Get("partNumber") == "" {
+		for mk, mv := range obj.Metadata {
+			if mk = textproto.CanonicalMIMEHeaderKey(mk); strings.HasPrefix(mk, checksumHeaderPrefix) {
+				w.Header().Set(mk, mv)
+			}
+		}
+	}
+
 	w.Header().Set("Accept-Ranges", "bytes")
 
 	// Handle response-* query parameters to override response headers
@@ -864,10 +876,28 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 	if err != nil {
 		return err
 	}
+	reader = rdr
 
-	result, err := g.storage.PutObject(r.Context(), bucket, object, meta, rdr, size)
+	// Check the body against any checksum given, and store it to be
+	// returned when asked for
+	checksumAlgorithm, checksum, err := requestChecksum(r.Header)
 	if err != nil {
 		return err
+	}
+	checksumHeader, checksumValue := "", ""
+	if checksumAlgorithm != "" {
+		reader = newChecksumReader(reader, checksumAlgorithm, checksum)
+		checksumHeader = textproto.CanonicalMIMEHeaderKey(checksumHeaderPrefix + checksumAlgorithm)
+		checksumValue = base64.StdEncoding.EncodeToString(checksum)
+		meta[checksumHeader] = checksumValue
+	}
+
+	result, err := g.storage.PutObject(r.Context(), bucket, object, meta, reader, size)
+	if err != nil {
+		return err
+	}
+	if checksumHeader != "" {
+		w.Header().Set(checksumHeader, checksumValue)
 	}
 
 	if result.VersionID != "" {
