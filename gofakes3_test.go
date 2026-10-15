@@ -684,6 +684,49 @@ func TestGetObjectRange(t *testing.T) {
 	}
 }
 
+// TestGetObjectRangeStatus checks a ranged GET returns 206 Partial
+// Content and a plain GET 200 OK.
+func TestGetObjectRangeStatus(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	ts.backendPutString(defaultBucket, "foo", nil, "testcontent")
+	client := httpClient()
+
+	for _, test := range []struct {
+		rnge         string
+		status       int
+		contentRange string
+		body         string
+	}{
+		{"", http.StatusOK, "", "testcontent"},
+		{"bytes=4-7", http.StatusPartialContent, "bytes 4-7/11", "cont"},
+		{"bytes=0-", http.StatusPartialContent, "bytes 0-10/11", "testcontent"},
+		{"bytes=-3", http.StatusPartialContent, "bytes 8-10/11", "ent"},
+	} {
+		t.Run(test.rnge, func(t *testing.T) {
+			rq, err := http.NewRequest("GET", ts.url("/"+defaultBucket+"/foo"), nil)
+			ts.OK(err)
+			if test.rnge != "" {
+				rq.Header.Set("Range", test.rnge)
+			}
+			rs, err := client.Do(rq)
+			ts.OK(err)
+			defer func() { _ = rs.Body.Close() }()
+			body, err := io.ReadAll(rs.Body)
+			ts.OK(err)
+			if rs.StatusCode != test.status {
+				t.Errorf("status: want %d got %d", test.status, rs.StatusCode)
+			}
+			if got := rs.Header.Get("Content-Range"); got != test.contentRange {
+				t.Errorf("Content-Range: want %q got %q", test.contentRange, got)
+			}
+			if string(body) != test.body {
+				t.Errorf("body: want %q got %q", test.body, body)
+			}
+		})
+	}
+}
+
 func TestGetObjectRangeInvalid(t *testing.T) {
 	ctx := context.Background()
 	assertRangeInvalid := func(ts *testServer, key string, hdr string) {
