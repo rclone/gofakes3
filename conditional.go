@@ -1,6 +1,8 @@
 package gofakes3
 
 import (
+	"context"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"time"
@@ -95,4 +97,89 @@ func checkConditions(h http.Header, names conditionalHeaders, etag string, lastM
 func objectLastModified(obj *Object) time.Time {
 	t, _ := http.ParseTime(obj.Metadata["Last-Modified"])
 	return t
+}
+
+// writeConditions are the conditions on writing an object given in a
+// request with If-Match or If-None-Match.
+type writeConditions struct {
+	ifMatch, ifNoneMatch string
+}
+
+// writeConditionsKey is the context key for the writeConditions of a
+// request.
+type writeConditionsKey struct{}
+
+// check checks the conditions against the current object, which
+// exists or not and if it exists has etag.
+func (c writeConditions) check(exists bool, etag string) error {
+	if c.ifMatch != "" {
+		if !exists {
+			return ErrNoSuchKey
+		}
+		if !etagMatches(c.ifMatch, etag) {
+			return ErrPreconditionFailed
+		}
+	}
+	if c.ifNoneMatch != "" && exists && etagMatches(c.ifNoneMatch, etag) {
+		return ErrPreconditionFailed
+	}
+	return nil
+}
+
+// CheckWriteConditions checks the If-Match and If-None-Match
+// conditions on writing an object, given in the request with ctx,
+// against the object currently stored, which exists or not and if it
+// exists has etag.
+//
+// It returns nil if the conditions are met or there are none,
+// ErrPreconditionFailed if they aren't met, or ErrNoSuchKey if
+// If-Match was given but the object doesn't exist.
+//
+// GoFakeS3 checks the conditions before calling PutObject or
+// CompleteMultipartUpload, but can't stop the object changing
+// afterwards. A backend can call this as it replaces the object, while
+// stopping other writes, to make the check atomic.
+func CheckWriteConditions(ctx context.Context, exists bool, etag string) error {
+	c, ok := ctx.Value(writeConditionsKey{}).(writeConditions)
+	if !ok {
+		return nil
+	}
+	return c.check(exists, etag)
+}
+
+// HasWriteConditions reports whether the request with ctx has If-Match
+// or If-None-Match conditions on writing an object, so whether
+// CheckWriteConditions needs calling.
+func HasWriteConditions(ctx context.Context) bool {
+	_, ok := ctx.Value(writeConditionsKey{}).(writeConditions)
+	return ok
+}
+
+// checkWriteConditions checks the If-Match and If-None-Match conditions
+// in r on writing the object at bucket/object.
+//
+// If there are conditions it returns r with them in its context for
+// the backend to check with CheckWriteConditions.
+func (g *GoFakeS3) checkWriteConditions(r *http.Request, bucket, object string) (*http.Request, error) {
+	c := writeConditions{
+		ifMatch:     r.Header.Get("If-Match"),
+		ifNoneMatch: r.Header.Get("If-None-Match"),
+	}
+	if c == (writeConditions{}) {
+		return r, nil
+	}
+	exists, etag := false, ""
+	obj, err := g.storage.HeadObject(r.Context(), bucket, object)
+	if err == nil {
+		exists, etag = true, hex.EncodeToString(obj.Hash)
+		if obj.Contents != nil {
+			_ = obj.Contents.Close()
+		}
+	} else if !HasErrorCode(err, ErrNoSuchKey) {
+		return r, err
+	}
+	if err := c.check(exists, etag); err != nil {
+		return r, err
+	}
+	return r.WithContext(context.WithValue(r.Context(), writeConditionsKey{}, c)), nil
 }

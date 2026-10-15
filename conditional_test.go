@@ -10,7 +10,9 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/rclone/gofakes3"
+	"github.com/rclone/gofakes3/s3mem"
 )
 
 // TestConditionalGet checks the conditional headers of GET and HEAD.
@@ -137,4 +139,145 @@ func TestConditionalCopy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConditionalPut checks the If-Match and If-None-Match conditions
+// on PutObject.
+func TestConditionalPut(t *testing.T) {
+	ctx := context.Background()
+	const etag = `"5d41402abc4b2a76b9719d911017c592"` // md5("hello")
+
+	for _, test := range []struct {
+		name        string
+		existing    bool
+		ifMatch     string
+		ifNoneMatch string
+		code        gofakes3.ErrorCode
+	}{
+		{"if-none-match * new", false, "", "*", ""},
+		{"if-none-match * existing", true, "", "*", gofakes3.ErrPreconditionFailed},
+		{"if-none-match etag existing", true, "", etag, gofakes3.ErrPreconditionFailed},
+		{"if-none-match other etag existing", true, "", `"other"`, ""},
+		{"if-match existing", true, etag, "", ""},
+		{"if-match other etag existing", true, `"other"`, "", gofakes3.ErrPreconditionFailed},
+		{"if-match new", false, etag, "", gofakes3.ErrNoSuchKey},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ts := newTestServer(t)
+			defer ts.Close()
+			if test.existing {
+				ts.backendPutString(defaultBucket, "object", nil, "hello")
+			}
+			in := &s3.PutObjectInput{
+				Bucket: aws.String(defaultBucket),
+				Key:    aws.String("object"),
+				Body:   bytes.NewReader([]byte("new")),
+			}
+			if test.ifMatch != "" {
+				in.IfMatch = aws.String(test.ifMatch)
+			}
+			if test.ifNoneMatch != "" {
+				in.IfNoneMatch = aws.String(test.ifNoneMatch)
+			}
+			_, err := ts.s3Client().PutObject(ctx, in)
+			if test.code == "" {
+				ts.OK(err)
+				ts.assertObject(defaultBucket, "object", nil, "new")
+				return
+			}
+			if !s3HasErrorCode(err, test.code) {
+				t.Fatal("expected", test.code, "got", err)
+			}
+			if test.existing {
+				ts.assertObject(defaultBucket, "object", nil, "hello")
+			} else if ts.backendObjectExists(defaultBucket, "object") {
+				t.Fatal("object created despite failed condition")
+			}
+		})
+	}
+}
+
+// TestConditionalCompleteMultipartUpload checks a failed condition on
+// CompleteMultipartUpload leaves the upload to be completed again.
+func TestConditionalCompleteMultipartUpload(t *testing.T) {
+	ctx := context.Background()
+	ts := newTestServer(t)
+	defer ts.Close()
+	svc := ts.s3Client()
+	ts.backendPutString(defaultBucket, "object", nil, "hello")
+
+	uploadID := ts.createMultipartUpload(defaultBucket, "object", nil)
+	part := ts.uploadPart(defaultBucket, "object", uploadID, 1, []byte("new"))
+	in := &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(defaultBucket),
+		Key:             aws.String("object"),
+		UploadId:        aws.String(uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: []types.CompletedPart{part}},
+		IfNoneMatch:     aws.String("*"),
+	}
+	_, err := svc.CompleteMultipartUpload(ctx, in)
+	if !s3HasErrorCode(err, gofakes3.ErrPreconditionFailed) {
+		t.Fatal("expected PreconditionFailed, got", err)
+	}
+	ts.assertObject(defaultBucket, "object", nil, "hello")
+
+	in.IfNoneMatch = nil
+	_, err = svc.CompleteMultipartUpload(ctx, in)
+	ts.OK(err)
+	ts.assertObject(defaultBucket, "object", nil, "new")
+}
+
+// conditionCheckingBackend checks the write conditions when an object
+// is written as a backend which does so atomically would.
+type conditionCheckingBackend struct {
+	*s3mem.Backend
+	hasConditions bool
+	checkErr      error
+}
+
+func (b *conditionCheckingBackend) PutObject(ctx context.Context, bucketName, key string, meta map[string]string, input io.Reader, size int64) (gofakes3.PutObjectResult, error) {
+	b.hasConditions = gofakes3.HasWriteConditions(ctx)
+	// Pretend the object changed since GoFakeS3 checked it
+	b.checkErr = gofakes3.CheckWriteConditions(ctx, true, "changed")
+	if b.checkErr != nil {
+		return gofakes3.PutObjectResult{}, b.checkErr
+	}
+	return b.Backend.PutObject(ctx, bucketName, key, meta, input, size)
+}
+
+// TestCheckWriteConditions checks the write conditions are passed to
+// the backend to check.
+func TestCheckWriteConditions(t *testing.T) {
+	ctx := context.Background()
+	backend := &conditionCheckingBackend{Backend: s3mem.New()}
+	ts := newTestServer(t, withBackend(backend))
+	defer ts.Close()
+
+	// Without conditions there is nothing to check
+	_, err := ts.s3Client().PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(defaultBucket),
+		Key:    aws.String("object"),
+		Body:   bytes.NewReader([]byte("hello")),
+	})
+	ts.OK(err)
+	ts.OK(backend.checkErr)
+	if backend.hasConditions {
+		t.Error("HasWriteConditions true without conditions")
+	}
+
+	// The object matches when GoFakeS3 checks, but not when the
+	// backend does
+	_, err = ts.s3Client().PutObject(ctx, &s3.PutObjectInput{
+		Bucket:  aws.String(defaultBucket),
+		Key:     aws.String("object"),
+		Body:    bytes.NewReader([]byte("new")),
+		IfMatch: aws.String(`"5d41402abc4b2a76b9719d911017c592"`),
+	})
+	if !s3HasErrorCode(err, gofakes3.ErrPreconditionFailed) {
+		t.Fatal("expected PreconditionFailed, got", err)
+	}
+	if !backend.hasConditions {
+		t.Error("HasWriteConditions false with conditions")
+	}
+	ts.assertObject(defaultBucket, "object", nil, "hello")
 }

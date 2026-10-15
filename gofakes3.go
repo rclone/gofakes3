@@ -744,6 +744,11 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 		return g.copyObject(bucket, object, meta, w, r)
 	}
 
+	r, err = g.checkWriteConditions(r, bucket, object)
+	if err != nil {
+		return err
+	}
+
 	contentLength := r.Header.Get("Content-Length")
 	if contentLength == "" {
 		return ErrMissingContentLength
@@ -1175,6 +1180,11 @@ func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID Uploa
 
 	var in CompleteMultipartUploadRequest
 	if err := g.xmlDecodeBody(r.Body, &in); err != nil {
+		return err
+	}
+
+	r, err = g.checkWriteConditions(r, bucket, object)
+	if err != nil {
 		return err
 	}
 
