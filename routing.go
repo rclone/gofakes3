@@ -37,7 +37,7 @@ func (g *GoFakeS3) routeBase(w http.ResponseWriter, r *http.Request) {
 		err = g.routeObjectTagging(bucket, object, w, r)
 
 	} else if sub := unsupportedSubresource(query); sub != "" {
-		err = g.routeUnsupported(bucket, sub, w, r)
+		err = g.routeUnsupported(bucket, object, sub, w, r)
 
 	} else if uploadID := UploadID(query.Get("uploadId")); uploadID != "" {
 		err = g.routeMultipartUpload(bucket, object, uploadID, w, r)
@@ -233,19 +233,22 @@ func unsupportedSubresource(query url.Values) string {
 	return ""
 }
 
-// routeUnsupported refuses a request for an unsupported sub-resource.
+// routeUnsupported handles a request for an unsupported sub-resource,
+// answering as S3 does when that feature isn't configured if it can,
+// and refusing it otherwise.
 //
 // These must not be handled as plain object or bucket requests, as
 // that would, for example, overwrite an object with the body of a PUT
 // ?acl or delete a bucket for a DELETE ?policy.
-func (g *GoFakeS3) routeUnsupported(bucket, sub string, w http.ResponseWriter, r *http.Request) error {
+func (g *GoFakeS3) routeUnsupported(bucket, object, sub string, w http.ResponseWriter, r *http.Request) error {
 	g.log.Print(LogInfo, "unsupported sub-resource", sub, r.Method, r.URL.Path)
-	if bucket != "" {
-		if err := g.ensureBucketExists(r, bucket); err != nil {
-			return err
-		}
+	if bucket == "" {
+		return ErrNotImplemented
 	}
-	return ErrNotImplemented
+	if err := g.ensureBucketExists(r, bucket); err != nil {
+		return err
+	}
+	return g.routeUnsupportedStub(bucket, object, sub, w, r)
 }
 
 func versionFromQuery(qv []string) string {

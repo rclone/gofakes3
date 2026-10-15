@@ -55,12 +55,26 @@ const (
 	// The proposed upload exceeds the maximum allowed object size.
 	ErrEntityTooLarge ErrorCode = "EntityTooLarge"
 
-	ErrInvalidRange         ErrorCode = "InvalidRange"
-	ErrInvalidRequest       ErrorCode = "InvalidRequest"
-	ErrInvalidTag           ErrorCode = "InvalidTag"
-	ErrInvalidToken         ErrorCode = "InvalidToken"
-	ErrKeyTooLong           ErrorCode = "KeyTooLongError" // This is not a typo: Error is part of the string, but redundant in the constant name
-	ErrMalformedPOSTRequest ErrorCode = "MalformedPOSTRequest"
+	ErrInvalidRange       ErrorCode = "InvalidRange"
+	ErrInvalidRequest     ErrorCode = "InvalidRequest"
+	ErrInvalidTag         ErrorCode = "InvalidTag"
+	ErrInvalidBucketState ErrorCode = "InvalidBucketState"
+
+	// These are returned for the configuration of a bucket which
+	// hasn't been set.
+	ErrNoSuchBucketPolicy                        ErrorCode = "NoSuchBucketPolicy"
+	ErrNoSuchCORSConfiguration                   ErrorCode = "NoSuchCORSConfiguration"
+	ErrNoSuchLifecycleConfiguration              ErrorCode = "NoSuchLifecycleConfiguration"
+	ErrNoSuchPublicAccessBlockConfiguration      ErrorCode = "NoSuchPublicAccessBlockConfiguration"
+	ErrNoSuchTagSet                              ErrorCode = "NoSuchTagSet"
+	ErrNoSuchWebsiteConfiguration                ErrorCode = "NoSuchWebsiteConfiguration"
+	ErrObjectLockConfigurationNotFound           ErrorCode = "ObjectLockConfigurationNotFoundError"
+	ErrOwnershipControlsNotFound                 ErrorCode = "OwnershipControlsNotFoundError"
+	ErrReplicationConfigurationNotFound          ErrorCode = "ReplicationConfigurationNotFoundError"
+	ErrServerSideEncryptionConfigurationNotFound ErrorCode = "ServerSideEncryptionConfigurationNotFoundError"
+	ErrInvalidToken                              ErrorCode = "InvalidToken"
+	ErrKeyTooLong                                ErrorCode = "KeyTooLongError" // This is not a typo: Error is part of the string, but redundant in the constant name
+	ErrMalformedPOSTRequest                      ErrorCode = "MalformedPOSTRequest"
 
 	// One or more of the specified parts could not be found. The part might
 	// not have been uploaded, or the specified entity tag might not have
@@ -252,7 +266,8 @@ func (e ErrorCode) Message() string {
 func (e ErrorCode) Status() int {
 	switch e {
 	case ErrBucketAlreadyExists,
-		ErrBucketNotEmpty:
+		ErrBucketNotEmpty,
+		ErrInvalidBucketState:
 		return http.StatusConflict
 
 	case ErrBadDigest,
@@ -289,7 +304,17 @@ func (e ErrorCode) Status() int {
 	case ErrNoSuchBucket,
 		ErrNoSuchKey,
 		ErrNoSuchUpload,
-		ErrNoSuchVersion:
+		ErrNoSuchVersion,
+		ErrNoSuchBucketPolicy,
+		ErrNoSuchCORSConfiguration,
+		ErrNoSuchLifecycleConfiguration,
+		ErrNoSuchPublicAccessBlockConfiguration,
+		ErrNoSuchTagSet,
+		ErrNoSuchWebsiteConfiguration,
+		ErrObjectLockConfigurationNotFound,
+		ErrOwnershipControlsNotFound,
+		ErrReplicationConfigurationNotFound,
+		ErrServerSideEncryptionConfigurationNotFound:
 		return http.StatusNotFound
 
 	case ErrNotImplemented:

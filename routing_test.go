@@ -52,8 +52,9 @@ func TestRoutingSlashes(t *testing.T) {
 }
 
 // TestRoutingUnsupportedSubresources checks requests for sub-resources
-// which aren't implemented are refused and don't touch the object or
-// bucket they name.
+// which aren't implemented are refused, or answered as S3 does when
+// they aren't configured, and don't touch the object or bucket they
+// name.
 func TestRoutingUnsupportedSubresources(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -63,9 +64,10 @@ func TestRoutingUnsupportedSubresources(t *testing.T) {
 
 	for _, test := range []struct {
 		name string
+		code gofakes3.ErrorCode // "" for success
 		call func() error
 	}{
-		{"PutObjectAcl", func() error {
+		{"PutObjectAcl", "", func() error {
 			_, err := svc.PutObjectAcl(ctx, &s3.PutObjectAclInput{
 				Bucket: aws.String(defaultBucket),
 				Key:    aws.String("object"),
@@ -73,21 +75,21 @@ func TestRoutingUnsupportedSubresources(t *testing.T) {
 			})
 			return err
 		}},
-		{"GetObjectAcl", func() error {
+		{"GetObjectAcl", "", func() error {
 			_, err := svc.GetObjectAcl(ctx, &s3.GetObjectAclInput{
 				Bucket: aws.String(defaultBucket),
 				Key:    aws.String("object"),
 			})
 			return err
 		}},
-		{"PutBucketTagging", func() error {
+		{"PutBucketTagging", gofakes3.ErrNotImplemented, func() error {
 			_, err := svc.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
 				Bucket:  aws.String(defaultBucket),
 				Tagging: &types.Tagging{TagSet: []types.Tag{{Key: aws.String("k"), Value: aws.String("v")}}},
 			})
 			return err
 		}},
-		{"PutObjectRetention", func() error {
+		{"PutObjectRetention", gofakes3.ErrInvalidRequest, func() error {
 			_, err := svc.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
 				Bucket:    aws.String(defaultBucket),
 				Key:       aws.String("object"),
@@ -95,20 +97,20 @@ func TestRoutingUnsupportedSubresources(t *testing.T) {
 			})
 			return err
 		}},
-		{"PutBucketPolicy", func() error {
+		{"PutBucketPolicy", gofakes3.ErrNotImplemented, func() error {
 			_, err := svc.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
 				Bucket: aws.String(defaultBucket),
 				Policy: aws.String("{}"),
 			})
 			return err
 		}},
-		{"DeleteBucketPolicy", func() error {
+		{"DeleteBucketPolicy", "", func() error {
 			_, err := svc.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{
 				Bucket: aws.String(defaultBucket),
 			})
 			return err
 		}},
-		{"DeleteBucketEncryption", func() error {
+		{"DeleteBucketEncryption", "", func() error {
 			_, err := svc.DeleteBucketEncryption(ctx, &s3.DeleteBucketEncryptionInput{
 				Bucket: aws.String(defaultBucket),
 			})
@@ -117,8 +119,10 @@ func TestRoutingUnsupportedSubresources(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := test.call()
-			if !s3HasErrorCode(err, gofakes3.ErrNotImplemented) {
-				t.Fatal("expected NotImplemented, found", err)
+			if test.code == "" {
+				ts.OK(err)
+			} else if !s3HasErrorCode(err, test.code) {
+				t.Fatal("expected", test.code, "found", err)
 			}
 			ts.assertObject(defaultBucket, "object", nil, "hello")
 		})
