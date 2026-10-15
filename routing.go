@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -39,7 +40,10 @@ func (g *GoFakeS3) routeBase(w http.ResponseWriter, r *http.Request) {
 		object = parts[1]
 	}
 
-	if uploadID := UploadID(query.Get("uploadId")); uploadID != "" {
+	if sub := unsupportedSubresource(query); sub != "" {
+		err = g.routeUnsupported(bucket, sub, w, r)
+
+	} else if uploadID := UploadID(query.Get("uploadId")); uploadID != "" {
 		err = g.routeMultipartUpload(bucket, object, uploadID, w, r)
 
 	} else if _, ok := query["uploads"]; ok {
@@ -185,6 +189,65 @@ func (g *GoFakeS3) routeMultipartUpload(bucket, object string, uploadID UploadID
 	default:
 		return ErrMethodNotAllowed
 	}
+}
+
+// unsupportedSubresources are the S3 sub-resources (query parameters
+// selecting an operation other than the plain object or bucket one)
+// which GoFakeS3 doesn't implement.
+var unsupportedSubresources = []string{
+	"accelerate",
+	"acl",
+	"analytics",
+	"attributes",
+	"cors",
+	"encryption",
+	"intelligent-tiering",
+	"inventory",
+	"legal-hold",
+	"lifecycle",
+	"logging",
+	"metadataTable",
+	"metrics",
+	"notification",
+	"object-lock",
+	"ownershipControls",
+	"policy",
+	"policyStatus",
+	"publicAccessBlock",
+	"replication",
+	"requestPayment",
+	"restore",
+	"retention",
+	"select",
+	"tagging",
+	"torrent",
+	"website",
+}
+
+// unsupportedSubresource returns the first unsupported sub-resource
+// named in query, or "" if there is none.
+func unsupportedSubresource(query url.Values) string {
+	for _, sub := range unsupportedSubresources {
+		if _, ok := query[sub]; ok {
+			return sub
+		}
+	}
+	return ""
+}
+
+// routeUnsupported refuses a request for an unsupported sub-resource.
+//
+// These must not be handled as plain object or bucket requests, as
+// that would, for example, overwrite an object with the body of a PUT
+// ?acl or delete a bucket for a DELETE ?policy.
+func (g *GoFakeS3) routeUnsupported(bucket, sub string, w http.ResponseWriter, r *http.Request) error {
+	g.log.Print(LogInfo, "unsupported sub-resource", sub, r.Method, r.URL.Path)
+	if bucket != "" {
+		if err := g.ensureBucketExists(r, bucket); err != nil {
+			return err
+		}
+	}
+	return ErrNotImplemented
 }
 
 func versionFromQuery(qv []string) string {
