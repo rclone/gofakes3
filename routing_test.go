@@ -30,11 +30,25 @@ func TestRoutingSlashes(t *testing.T) {
 	assertStatus("nope", 404) // sanity check missing URL
 	assertStatus("test", 200)
 	assertStatus("test/", 200)
-	assertStatus("test//", 200) // don't care how many slashes
 	assertStatus("test/nope", 404)
 	assertStatus("test/obj", 200)
-	assertStatus("test/obj/", 200)
-	assertStatus("test/obj//", 200)
+
+	// Slashes at the start and end of keys are part of the key
+	assertStatus("test/obj/", 404)
+	assertStatus("test//obj", 404)
+	ts.backendPutString("test", "dir/", nil, "")
+	ts.backendPutString("test", "/rooted", nil, "")
+	assertStatus("test/dir/", 200)
+	assertStatus("test/dir", 404)
+	assertStatus("test//rooted", 200)
+	assertStatus("test/rooted", 404)
+
+	// Slashes before the bucket are ignored
+	rs, err := client.Head(ts.server.URL + "//test/obj")
+	ts.OK(err)
+	if rs.StatusCode != 200 {
+		t.Fatal("expected status 200 for //test/obj, found", rs.StatusCode)
+	}
 }
 
 // TestRoutingUnsupportedSubresources checks requests for sub-resources

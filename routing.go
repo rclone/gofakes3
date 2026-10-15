@@ -18,8 +18,10 @@ import (
 // verbs, but outside the core functionality, the clean separation starts
 // to degrade, especially around multipart uploads.
 func (g *GoFakeS3) routeBase(w http.ResponseWriter, r *http.Request) {
+	// Bucket names can't contain "/", so any leading "/" are removed,
+	// but the rest are kept as an object key may start or end with "/"
 	var (
-		path   = strings.Trim(r.URL.Path, "/")
+		path   = strings.TrimLeft(r.URL.Path, "/")
 		parts  = strings.SplitN(path, "/", 2)
 		bucket = parts[0]
 		query  = r.URL.Query()
