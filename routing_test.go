@@ -80,18 +80,10 @@ func TestRoutingUnsupportedSubresources(t *testing.T) {
 			})
 			return err
 		}},
-		{"PutObjectTagging", func() error {
-			_, err := svc.PutObjectTagging(ctx, &s3.PutObjectTaggingInput{
+		{"PutBucketTagging", func() error {
+			_, err := svc.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
 				Bucket:  aws.String(defaultBucket),
-				Key:     aws.String("object"),
 				Tagging: &types.Tagging{TagSet: []types.Tag{{Key: aws.String("k"), Value: aws.String("v")}}},
-			})
-			return err
-		}},
-		{"DeleteObjectTagging", func() error {
-			_, err := svc.DeleteObjectTagging(ctx, &s3.DeleteObjectTaggingInput{
-				Bucket: aws.String(defaultBucket),
-				Key:    aws.String("object"),
 			})
 			return err
 		}},

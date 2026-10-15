@@ -385,8 +385,6 @@ func TestCreateObjectMetadataAndObjectTagging(t *testing.T) {
 		t.Fatal("wrong metadata key")
 	}
 
-	// Object tagging isn't implemented, so must be refused without
-	// touching the object or its metadata
 	_, err = svc.PutObjectTagging(ctx, &s3.PutObjectTaggingInput{
 		Bucket: aws.String(defaultBucket),
 		Key:    aws.String("object"),
@@ -396,9 +394,7 @@ func TestCreateObjectMetadataAndObjectTagging(t *testing.T) {
 			},
 		},
 	})
-	if !s3HasErrorCode(err, gofakes3.ErrNotImplemented) {
-		t.Fatal("expected NotImplemented, found", err)
-	}
+	ts.OK(err)
 
 	head, err = svc.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(defaultBucket),
@@ -410,6 +406,16 @@ func TestCreateObjectMetadataAndObjectTagging(t *testing.T) {
 		t.Fatalf("wrong metadata after PutObjectTagging: %+v", head.Metadata)
 	}
 	ts.assertObject(defaultBucket, "object", nil, "hello")
+
+	result, err := svc.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
+		Bucket: aws.String(defaultBucket),
+		Key:    aws.String("object"),
+	})
+	ts.OK(err)
+
+	if len(result.TagSet) != 1 || *result.TagSet[0].Key != "Tag-Test" || *result.TagSet[0].Value != "test" {
+		t.Fatalf("tag set wrong: %+v", result.TagSet)
+	}
 }
 
 func TestCopyObject(t *testing.T) {

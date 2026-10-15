@@ -29,6 +29,7 @@ type Backend struct {
 
 var _ gofakes3.Backend = &Backend{}
 var _ gofakes3.VersionedBackend = &Backend{}
+var _ gofakes3.ObjectTaggingBackend = &Backend{}
 
 type Option func(b *Backend)
 
@@ -525,4 +526,33 @@ func (db *Backend) nextVersion() gofakes3.VersionID {
 	v, scr := db.versionGenerator.Next(db.versionScratch)
 	db.versionScratch = scr
 	return v
+}
+
+// SetObjectTagging sets the tags of an existing object.
+func (db *Backend) SetObjectTagging(ctx context.Context, bucketName, objectName string, tagging string) error {
+	db.lock.Lock()
+	defer db.lock.Unlock()
+
+	bucket := db.buckets[bucketName]
+	if bucket == nil {
+		return gofakes3.BucketNotFound(bucketName)
+	}
+	obj := bucket.object(objectName)
+	if obj == nil || obj.data.deleteMarker {
+		return gofakes3.KeyNotFound(objectName)
+	}
+
+	// The metadata map is shared with objects already returned so
+	// is replaced rather than changed
+	meta := make(map[string]string, len(obj.data.metadata)+1)
+	for k, v := range obj.data.metadata {
+		meta[k] = v
+	}
+	if tagging == "" {
+		delete(meta, gofakes3.TaggingMetadataKey)
+	} else {
+		meta[gofakes3.TaggingMetadataKey] = tagging
+	}
+	obj.data.metadata = meta
+	return nil
 }

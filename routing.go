@@ -33,7 +33,10 @@ func (g *GoFakeS3) routeBase(w http.ResponseWriter, r *http.Request) {
 		object = parts[1]
 	}
 
-	if sub := unsupportedSubresource(query); sub != "" {
+	if _, ok := query["tagging"]; ok && object != "" {
+		err = g.routeObjectTagging(bucket, object, w, r)
+
+	} else if sub := unsupportedSubresource(query); sub != "" {
 		err = g.routeUnsupported(bucket, sub, w, r)
 
 	} else if uploadID := UploadID(query.Get("uploadId")); uploadID != "" {

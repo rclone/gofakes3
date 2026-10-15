@@ -657,6 +657,8 @@ func (g *GoFakeS3) writeGetOrHeadObjectResponse(obj *Object, w http.ResponseWrit
 		}
 	}
 
+	writeTaggingCount(w, obj.Metadata)
+
 	if obj.VersionID != "" {
 		w.Header().Set("x-amz-version-id", string(obj.VersionID))
 	}
@@ -978,6 +980,7 @@ func (g *GoFakeS3) copyObject(bucket, object string, meta map[string]string, w h
 
 	// With the COPY directive, the default, the new object has the
 	// source's metadata rather than any in the request
+	tagging := meta[TaggingMetadataKey]
 	if directive != "REPLACE" {
 		lastModified := meta["Last-Modified"]
 		meta = make(map[string]string, len(srcObj.Metadata))
@@ -987,6 +990,19 @@ func (g *GoFakeS3) copyObject(bucket, object string, meta map[string]string, w h
 			}
 		}
 		meta["Last-Modified"] = lastModified
+	}
+
+	// The tags are copied too unless x-amz-tagging-directive is REPLACE
+	switch tagDirective := r.Header.Get("X-Amz-Tagging-Directive"); tagDirective {
+	case "", "COPY":
+		tagging = srcObj.Metadata[TaggingMetadataKey]
+	case "REPLACE":
+	default:
+		return ErrorInvalidArgument("x-amz-tagging-directive", tagDirective, "Unknown tagging directive.")
+	}
+	delete(meta, TaggingMetadataKey)
+	if tagging != "" {
+		meta[TaggingMetadataKey] = tagging
 	}
 
 	result, err := g.storage.CopyObject(ctx, srcBucket, srcKey, bucket, object, meta)
@@ -1636,10 +1652,20 @@ func metadataHeaders(headers map[string][]string, at time.Time, sizeLimit int) (
 	meta := make(map[string]string)
 	for hk, hv := range headers {
 		hk = textproto.CanonicalMIMEHeaderKey(hk)
-		if len(hv) == 0 || !isMetadataHeader(hk) {
+		if len(hv) == 0 || !(isMetadataHeader(hk) || hk == "X-Amz-Tagging") {
 			continue
 		}
 		v := hv[0]
+		if hk == "X-Amz-Tagging" {
+			tagging, err := parseTaggingHeader(v)
+			if err != nil {
+				return nil, err
+			}
+			if tagging != "" {
+				meta[TaggingMetadataKey] = tagging
+			}
+			continue
+		}
 		if hk == "Content-Encoding" {
 			// aws-chunked describes how the request body is sent,
 			// not the object
