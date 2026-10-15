@@ -1405,3 +1405,63 @@ func TestGetObjectResponseOverride(t *testing.T) {
 		}
 	})
 }
+
+// TestObjectMetadataHeaders checks only object metadata is stored with
+// an object, not headers which describe the request, and that user
+// metadata names are returned lower case.
+func TestObjectMetadataHeaders(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	client := ts.rawClient()
+
+	body := []byte("hello")
+	rq := client.Request("PUT", "/"+defaultBucket+"/object", body)
+	for k, v := range map[string]string{
+		"X-Amz-Meta-Foo":   "bar",
+		"Content-Type":     "text/plain",
+		"Content-Encoding": "gzip,aws-chunked",
+		"Cache-Control":    "no-cache",
+		"Expires":          "Thu, 01 Dec 2094 16:00:00 GMT",
+		"X-Amz-Server-Side-Encryption-Customer-Key": "c2VjcmV0",
+		"X-Amz-Checksum-Crc32":                      "AAAAAA==",
+		"X-Amz-Tagging":                             "k=v",
+	} {
+		rq.Header.Set(k, v)
+	}
+	rs, err := client.Do(rq)
+	ts.OK(err)
+	_ = rs.Body.Close()
+	if rs.StatusCode != http.StatusOK {
+		t.Fatal("PUT failed with status", rs.StatusCode)
+	}
+
+	headRq := client.Request("HEAD", "/"+defaultBucket+"/object", nil)
+	headRq.Header.Set("Connection", "close")
+	raw, err := client.SendRaw(headRq)
+	ts.OK(err)
+	head := string(raw)
+	for _, want := range []string{
+		"\r\nx-amz-meta-foo: bar\r\n",
+		"\r\nContent-Type: text/plain\r\n",
+		"\r\nContent-Encoding: gzip\r\n",
+		"\r\nCache-Control: no-cache\r\n",
+		"\r\nExpires: Thu, 01 Dec 2094 16:00:00 GMT\r\n",
+	} {
+		if !strings.Contains(head, want) {
+			t.Errorf("HEAD response missing %q:\n%s", want, head)
+		}
+	}
+	for _, notWant := range []string{
+		"\r\nX-Amz-Server-Side-Encryption-Customer-Key:",
+		"\r\nX-Amz-Checksum-Crc32:",
+		"\r\nX-Amz-Tagging:",
+		"\r\nX-Amz-Date:",
+		"\r\nX-Amz-Content-Sha256:",
+		"\r\nContent-Md5:",
+		"\r\nX-Amz-Meta-Foo:",
+	} {
+		if strings.Contains(head, notWant) {
+			t.Errorf("HEAD response contains %q:\n%s", notWant, head)
+		}
+	}
+}

@@ -565,7 +565,16 @@ func (g *GoFakeS3) writeGetOrHeadObjectResponse(obj *Object, w http.ResponseWrit
 	}
 
 	for mk, mv := range obj.Metadata {
-		w.Header().Set(mk, mv)
+		mk = textproto.CanonicalMIMEHeaderKey(mk)
+		switch {
+		case strings.HasPrefix(mk, "X-Amz-Meta-"):
+			// Clients take the case of user metadata names from
+			// the response, so send them lower case as AWS does
+			// rather than in canonical form.
+			w.Header()[strings.ToLower(mk)] = []string{mv}
+		case mk == "Last-Modified" || isMetadataHeader(mk):
+			w.Header().Set(mk, mv)
+		}
 	}
 
 	if obj.VersionID != "" {
@@ -712,7 +721,7 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 		return err
 	}
 
-	if _, ok := meta["X-Amz-Copy-Source"]; ok {
+	if r.Header.Get("X-Amz-Copy-Source") != "" {
 		return g.copyObject(bucket, object, meta, w, r)
 	}
 
@@ -742,7 +751,7 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 
 	var reader io.Reader
 
-	if isChunkedStreamingPayload(meta["X-Amz-Content-Sha256"]) {
+	if isChunkedStreamingPayload(r.Header.Get("X-Amz-Content-Sha256")) {
 		reader = newChunkedReader(r.Body)
 	} else {
 		reader = r.Body
@@ -750,8 +759,8 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 
 	// This header is set e.g. when the body contains trailing headers
 	// It is used to extract real object length
-	if _, ok := meta["X-Amz-Decoded-Content-Length"]; ok {
-		size, err = strconv.ParseInt(meta["X-Amz-Decoded-Content-Length"], 10, 64)
+	if decodedLength := r.Header.Get("X-Amz-Decoded-Content-Length"); decodedLength != "" {
+		size, err = strconv.ParseInt(decodedLength, 10, 64)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest) // XXX: no code for this, according to s3tests
 			return nil
@@ -793,7 +802,7 @@ func (g *GoFakeS3) copyObject(bucket, object string, meta map[string]string, w h
 		return err
 	}
 
-	source := meta["X-Amz-Copy-Source"]
+	source := r.Header.Get("X-Amz-Copy-Source")
 	g.log.Print(LogInfo, "COPY:", source, "TO", bucket, object)
 
 	if len(object) > KeySizeLimit {
@@ -1016,15 +1025,10 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 	// nothing useful anyway as real I/O problems surface from Read.
 	defer func() { _ = r.Body.Close() }()
 
-	meta, err := metadataHeaders(r.Header, g.timeSource.Now(), g.metadataSizeLimit)
-	if err != nil {
-		return err
-	}
-
 	var rdr io.Reader
-	if isChunkedStreamingPayload(meta["X-Amz-Content-Sha256"]) {
+	if isChunkedStreamingPayload(r.Header.Get("X-Amz-Content-Sha256")) {
 		rdr = newChunkedReader(r.Body)
-		size, err = strconv.ParseInt(meta["X-Amz-Decoded-Content-Length"], 10, 64)
+		size, err = strconv.ParseInt(r.Header.Get("X-Amz-Decoded-Content-Length"), 10, 64)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest) // XXX: no code for this, according to s3tests
 			return nil
@@ -1035,8 +1039,8 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 
 	// This header is set e.g. when the body contains trailing headers
 	// It is used to extract real object length
-	if _, ok := meta["X-Amz-Decoded-Content-Length"]; ok {
-		size, err = strconv.ParseInt(meta["X-Amz-Decoded-Content-Length"], 10, 64)
+	if decodedLength := r.Header.Get("X-Amz-Decoded-Content-Length"); decodedLength != "" {
+		size, err = strconv.ParseInt(decodedLength, 10, 64)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest) // XXX: no code for this, according to s3tests
 			return nil
@@ -1351,12 +1355,46 @@ func metadataSize(meta map[string]string) int {
 	return total
 }
 
+// isMetadataHeader reports whether the header hk, in canonical form,
+// is stored with an object and returned when it is read.
+//
+// Other request headers, such as X-Amz-Date, X-Amz-Checksum-* or the
+// SSE-C key in X-Amz-Server-Side-Encryption-Customer-Key, describe
+// the request only and must not be stored and returned.
+func isMetadataHeader(hk string) bool {
+	switch hk {
+	case "Cache-Control",
+		"Content-Disposition",
+		"Content-Encoding",
+		"Content-Language",
+		"Content-Type",
+		"Expires",
+		"X-Amz-Storage-Class",
+		"X-Amz-Website-Redirect-Location":
+		return true
+	}
+	return strings.HasPrefix(hk, "X-Amz-Meta-")
+}
+
+// metadataHeaders returns the object metadata in the request headers,
+// with Last-Modified set to at.
 func metadataHeaders(headers map[string][]string, at time.Time, sizeLimit int) (map[string]string, error) {
 	meta := make(map[string]string)
 	for hk, hv := range headers {
-		if strings.HasPrefix(hk, "X-Amz-") || strings.HasPrefix(hk, "Content-") || hk == "Cache-Control" {
-			meta[hk] = hv[0]
+		hk = textproto.CanonicalMIMEHeaderKey(hk)
+		if len(hv) == 0 || !isMetadataHeader(hk) {
+			continue
 		}
+		v := hv[0]
+		if hk == "Content-Encoding" {
+			// aws-chunked describes how the request body is sent,
+			// not the object
+			v = removeToken(v, "aws-chunked")
+			if v == "" {
+				continue
+			}
+		}
+		meta[hk] = v
 	}
 	meta["Last-Modified"] = formatHeaderTime(at)
 
@@ -1365,6 +1403,25 @@ func metadataHeaders(headers map[string][]string, at time.Time, sizeLimit int) (
 	}
 
 	return meta, nil
+}
+
+// removeToken removes token from the comma separated list of tokens in
+// v, returning v unchanged if it doesn't have it.
+func removeToken(v, token string) string {
+	var out []string
+	found := false
+	for _, t := range strings.Split(v, ",") {
+		t = strings.TrimSpace(t)
+		if strings.EqualFold(t, token) {
+			found = true
+		} else if t != "" {
+			out = append(out, t)
+		}
+	}
+	if !found {
+		return v
+	}
+	return strings.Join(out, ", ")
 }
 
 func listBucketPageFromQuery(query url.Values) (page ListBucketPage, rerr error) {
