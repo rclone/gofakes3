@@ -447,6 +447,13 @@ type CopyObjectResult struct {
 	LastModified ContentTime `xml:"LastModified,omitempty"`
 }
 
+// CopyPartResult is the result of an UploadPartCopy.
+type CopyPartResult struct {
+	XMLName      xml.Name    `xml:"CopyPartResult"`
+	ETag         string      `xml:"ETag"`
+	LastModified ContentTime `xml:"LastModified"`
+}
+
 // MFADeleteStatus is used by VersioningConfiguration.
 type MFADeleteStatus string
 

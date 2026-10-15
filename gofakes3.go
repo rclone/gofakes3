@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -884,17 +885,9 @@ func (g *GoFakeS3) copyObject(bucket, object string, meta map[string]string, w h
 		return ResourceError(ErrKeyTooLong, object)
 	}
 
-	// XXX No support for versionId subresource
-	parts := strings.SplitN(strings.TrimPrefix(source, "/"), "/", 2)
-	if len(parts) != 2 {
-		return ErrorInvalidArgument("x-amz-copy-source", source, "Copy Source must mention the source bucket and key: sourcebucket/sourcekey")
-	}
-	srcBucket := parts[0]
-	srcKey := strings.SplitN(parts[1], "?", 2)[0]
-
-	srcKey, err = url.QueryUnescape(srcKey)
+	srcBucket, srcKey, err := parseCopySource(source)
 	if err != nil {
-		return ErrorInvalidArgument("x-amz-copy-source", source, "Invalid copy source encoding")
+		return err
 	}
 
 	directive := r.Header.Get("X-Amz-Metadata-Directive")
@@ -952,6 +945,23 @@ func (g *GoFakeS3) copyObject(bucket, object string, meta map[string]string, w h
 	// }
 
 	return g.xmlEncoder(w).Encode(result)
+}
+
+// parseCopySource returns the bucket and key of the source of a copy
+// from its x-amz-copy-source header.
+func parseCopySource(source string) (bucket, key string, err error) {
+	// XXX No support for versionId subresource
+	parts := strings.SplitN(strings.TrimPrefix(source, "/"), "/", 2)
+	if len(parts) != 2 {
+		return "", "", ErrorInvalidArgument("x-amz-copy-source", source, "Copy Source must mention the source bucket and key: sourcebucket/sourcekey")
+	}
+	bucket = parts[0]
+	key = strings.SplitN(parts[1], "?", 2)[0]
+	key, err = url.QueryUnescape(key)
+	if err != nil {
+		return "", "", ErrorInvalidArgument("x-amz-copy-source", source, "Invalid copy source encoding")
+	}
+	return bucket, key, nil
 }
 
 func (g *GoFakeS3) deleteObject(bucket, object string, w http.ResponseWriter, r *http.Request) error {
@@ -1100,11 +1110,6 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 		return ErrInvalidPart
 	}
 
-	size, err := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
-	if err != nil {
-		return ErrMissingContentLength
-	}
-
 	upload, err := g.uploader.Get(g.owner(r.Context()), bucket, object, uploadID)
 	if err != nil {
 		// FIXME: What happens with S3 when you abort a multipart upload while
@@ -1112,6 +1117,15 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 		// reference to the part even though another request goroutine may
 		// delete it; it will be available for GC when this function finishes.
 		return err
+	}
+
+	if r.Header.Get("X-Amz-Copy-Source") != "" {
+		return g.uploadPartCopy(upload, int(partNumber), w, r)
+	}
+
+	size, err := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
+	if err != nil {
+		return ErrMissingContentLength
 	}
 
 	// The error from closing the request body is discarded - from go1.27
@@ -1160,34 +1174,100 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 		}
 	}
 
+	etag, err := g.storePart(r.Context(), upload, int(partNumber), size, rdr)
+	if err != nil {
+		return err
+	}
+	w.Header().Add("ETag", etag)
+	return nil
+}
+
+// storePart stores part partNumber of upload, size bytes read from rdr,
+// returning its ETag.
+func (g *GoFakeS3) storePart(ctx context.Context, upload *multipartUpload, partNumber int, size int64, rdr io.Reader) (etag string, err error) {
 	if upload.streaming {
-		etag, err := g.multipart.UploadPart(r.Context(), bucket, object, uploadID, int(partNumber), size, rdr)
+		etag, err := g.multipart.UploadPart(ctx, upload.Bucket, upload.Object, upload.ID, partNumber, size, rdr)
 		if err != nil {
-			return err
+			return "", err
 		}
-		if err := upload.AddStreamingPart(int(partNumber), g.timeSource.Now(), size, etag); err != nil {
-			return err
+		if err := upload.AddStreamingPart(partNumber, g.timeSource.Now(), size, etag); err != nil {
+			return "", err
 		}
-		w.Header().Add("ETag", etag)
-		return nil
+		return etag, nil
 	}
 
 	body, err := ReadAll(rdr, size)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if int64(len(body)) != size {
-		return ErrIncompleteBody
+		return "", ErrIncompleteBody
 	}
 
-	etag, err := upload.AddPart(int(partNumber), g.timeSource.Now(), body)
+	return upload.AddPart(partNumber, g.timeSource.Now(), body)
+}
+
+// copySourceRange matches a valid x-amz-copy-source-range.
+var copySourceRange = regexp.MustCompile(`^bytes=([0-9]+)-([0-9]+)$`)
+
+// uploadPartCopy stores part partNumber of upload by copying all or a
+// range of an existing object.
+func (g *GoFakeS3) uploadPartCopy(upload *multipartUpload, partNumber int, w http.ResponseWriter, r *http.Request) (err error) {
+	ctx := r.Context()
+	srcBucket, srcKey, err := parseCopySource(r.Header.Get("X-Amz-Copy-Source"))
 	if err != nil {
 		return err
 	}
+	g.log.Print(LogInfo, "upload part copy", srcBucket, srcKey, "to", upload.Bucket, upload.Object, upload.ID, partNumber)
 
-	w.Header().Add("ETag", etag)
-	return nil
+	srcObj, err := g.storage.HeadObject(ctx, srcBucket, srcKey)
+	if err != nil {
+		return err
+	}
+	if srcObj.Contents != nil {
+		_ = srcObj.Contents.Close()
+	}
+	srcETag := `"` + hex.EncodeToString(srcObj.Hash) + `"`
+	if err := checkConditions(r.Header, copySourceConditions, srcETag, objectLastModified(srcObj), ErrPreconditionFailed); err != nil {
+		return err
+	}
+
+	var rnge *ObjectRangeRequest
+	if v := r.Header.Get("X-Amz-Copy-Source-Range"); v != "" {
+		m := copySourceRange.FindStringSubmatch(v)
+		if m == nil {
+			return ErrorInvalidArgument("x-amz-copy-source-range", v, "The x-amz-copy-source-range value must be of the form bytes=first-last where first and last are the zero-based offsets of the first and last bytes to copy")
+		}
+		start, err1 := strconv.ParseInt(m[1], 10, 64)
+		end, err2 := strconv.ParseInt(m[2], 10, 64)
+		if err1 != nil || err2 != nil {
+			return ErrorInvalidArgument("x-amz-copy-source-range", v, "The x-amz-copy-source-range value is out of range")
+		}
+		if start > end || end >= srcObj.Size {
+			return ErrorMessage(ErrInvalidRange, "The requested range is not satisfiable")
+		}
+		rnge = &ObjectRangeRequest{Start: start, End: end}
+	}
+
+	obj, err := g.storage.GetObject(ctx, srcBucket, srcKey, rnge)
+	if err != nil {
+		return err
+	}
+	defer CheckClose(obj.Contents, &err)
+	size := obj.Size
+	if obj.Range != nil {
+		size = obj.Range.Length
+	}
+
+	etag, err := g.storePart(ctx, upload, partNumber, size, obj.Contents)
+	if err != nil {
+		return err
+	}
+	return g.xmlEncoder(w).Encode(&CopyPartResult{
+		ETag:         etag,
+		LastModified: NewContentTime(g.timeSource.Now()),
+	})
 }
 
 // isChunkedStreamingPayload reports whether x-amz-content-sha256 denotes aws-chunked transfer encoding.
