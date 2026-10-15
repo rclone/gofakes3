@@ -1,11 +1,17 @@
 package gofakes3_test
 
 import (
+	"context"
 	"encoding/xml"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/rclone/gofakes3"
 )
 
 // getXML GETs path from ts and decodes the XML response into out,
@@ -176,4 +182,53 @@ func TestListBucketsPaginated(t *testing.T) {
 	if got := strings.Join(seen, ","); got != "bucket-a,bucket-b,bucket-c" {
 		t.Errorf("pages: got %q", got)
 	}
+}
+
+// TestListObjectVersionsUnversioned checks the objects of a backend
+// without versioning are listed as having one version, "null".
+func TestListObjectVersionsUnversioned(t *testing.T) {
+	ctx := context.Background()
+	ts := newTestServer(t, withFakerOptions(gofakes3.WithoutVersioning()))
+	defer ts.Close()
+	svc := ts.s3Client()
+	for _, key := range []string{"a", "b", "c"} {
+		ts.backendPutString(defaultBucket, key, nil, "x")
+	}
+
+	var keys []string
+	in := &s3.ListObjectVersionsInput{Bucket: aws.String(defaultBucket), MaxKeys: aws.Int32(2)}
+	for pages := 0; ; pages++ {
+		if pages > 3 {
+			t.Fatal("too many pages")
+		}
+		out, err := svc.ListObjectVersions(ctx, in)
+		ts.OK(err)
+		for _, v := range out.Versions {
+			if aws.ToString(v.VersionId) != "null" || !aws.ToBool(v.IsLatest) || aws.ToInt64(v.Size) != 1 {
+				t.Errorf("unexpected version %+v", v)
+			}
+			keys = append(keys, aws.ToString(v.Key))
+		}
+		if !aws.ToBool(out.IsTruncated) {
+			break
+		}
+		in.KeyMarker = out.NextKeyMarker
+		in.VersionIdMarker = out.NextVersionIdMarker
+	}
+	if got := strings.Join(keys, ","); got != "a,b,c" {
+		t.Errorf("keys: got %q", got)
+	}
+
+	// The versions listed can be deleted
+	var objects []types.ObjectIdentifier
+	for _, key := range keys {
+		objects = append(objects, types.ObjectIdentifier{Key: aws.String(key), VersionId: aws.String("null")})
+	}
+	_, err := svc.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		Bucket: aws.String(defaultBucket),
+		Delete: &types.Delete{Objects: objects},
+	})
+	ts.OK(err)
+	_, err = svc.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(defaultBucket)})
+	ts.OK(err)
 }

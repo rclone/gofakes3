@@ -444,12 +444,12 @@ func (g *GoFakeS3) getBucketLocation(bucketName string, w http.ResponseWriter, r
 }
 
 func (g *GoFakeS3) listBucketVersions(bucketName string, w http.ResponseWriter, r *http.Request) error {
-	if g.versioned == nil {
-		return ErrNotImplemented
-	}
-
 	if err := g.ensureBucketExists(r, bucketName); err != nil {
 		return err
+	}
+
+	if g.versioned == nil {
+		return g.listUnversionedBucketVersions(bucketName, w, r)
 	}
 
 	q := r.URL.Query()
@@ -490,6 +490,59 @@ func (g *GoFakeS3) listBucketVersions(bucketName string, w http.ResponseWriter, 
 	}
 
 	return g.xmlEncoder(w).Encode(bucket)
+}
+
+// listUnversionedBucketVersions lists the versions of the objects in a
+// bucket of a backend without versioning as S3 does for a bucket which
+// has never had versioning enabled: each object has one version,
+// "null".
+func (g *GoFakeS3) listUnversionedBucketVersions(bucketName string, w http.ResponseWriter, r *http.Request) error {
+	q := r.URL.Query()
+	prefix := prefixFromQuery(q)
+	page, err := listBucketVersionsPageFromQuery(q)
+	if err != nil {
+		return err
+	}
+	result := NewListBucketVersionsResult(bucketName, &prefix, &page)
+	if page.MaxKeys == 0 {
+		return g.xmlEncoder(w).Encode(result)
+	}
+
+	listPage := ListBucketPage{MaxKeys: page.MaxKeys}
+	if page.KeyMarker != "" {
+		listPage.Marker, listPage.HasMarker = page.KeyMarker, true
+	}
+	ctx := r.Context()
+	objects, err := g.storage.ListBucket(ctx, bucketName, &prefix, listPage)
+	if err == ErrInternalPageNotImplemented {
+		objects, err = g.storage.ListBucket(ctx, bucketName, &prefix, ListBucketPage{})
+	}
+	if err != nil {
+		return err
+	}
+
+	result.CommonPrefixes = objects.CommonPrefixes
+	for _, content := range objects.Contents {
+		result.Versions = append(result.Versions, &Version{
+			Key:          content.Key,
+			VersionID:    "null",
+			IsLatest:     true,
+			LastModified: content.LastModified,
+			Size:         content.Size,
+			StorageClass: StorageStandard,
+			ETag:         content.ETag,
+			Owner:        &defaultOwner,
+		})
+	}
+	result.IsTruncated = objects.IsTruncated
+	if objects.IsTruncated {
+		result.NextKeyMarker = objects.NextMarker
+		if result.NextKeyMarker == "" && len(objects.Contents) > 0 {
+			result.NextKeyMarker = objects.Contents[len(objects.Contents)-1].Key
+		}
+		result.NextVersionIDMarker = "null"
+	}
+	return g.xmlEncoder(w).Encode(result)
 }
 
 // CreateBucket creates a new S3 bucket in the BoltDB storage.
