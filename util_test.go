@@ -101,10 +101,13 @@ func TestReadAll(t *testing.T) {
 		}
 	})
 
-	t.Run("negative-size", func(t *testing.T) {
-		_, err := ReadAll(strings.NewReader("test"), -1)
-		if !HasErrorCode(err, ErrInvalidArgument) {
-			t.Fatal("expected ErrInvalidArgument, found", err)
+	t.Run("unknown-size", func(t *testing.T) {
+		b, err := ReadAll(strings.NewReader("test"), -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(b) != "test" {
+			t.Fatalf("expected %q, found %q", "test", b)
 		}
 	})
 }

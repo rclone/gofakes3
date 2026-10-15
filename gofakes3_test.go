@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -253,17 +254,39 @@ func TestCreateObjectMD5(t *testing.T) {
 func TestCreateObjectWithMissingContentLength(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	client := ts.rawClient()
-	body := []byte{}
-	rq, err := http.NewRequest("PUT", client.URL(fmt.Sprintf("/%s/yep", defaultBucket)).String(), maskReader(bytes.NewReader(body)))
-	if err != nil {
-		panic(err)
-	}
-	client.SetHeaders(rq, body)
-	rs, _ := client.Do(rq)
+
+	// A PUT with neither a Content-Length nor a chunked body
+	conn, err := net.Dial("tcp", ts.server.Listener.Addr().String())
+	ts.OK(err)
+	defer func() { _ = conn.Close() }()
+	_, err = fmt.Fprintf(conn, "PUT /%s/yep HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", defaultBucket)
+	ts.OK(err)
+	rs, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	ts.OK(err)
+	_ = rs.Body.Close()
 	if rs.StatusCode != http.StatusLengthRequired {
-		t.Fatal()
+		t.Fatal("expected status 411, found", rs.StatusCode)
 	}
+}
+
+// TestCreateObjectChunked checks a PUT with a chunked body and so no
+// Content-Length is accepted.
+func TestCreateObjectChunked(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	client := ts.rawClient()
+	body := []byte("hello")
+	rq, err := http.NewRequest("PUT", client.URL(fmt.Sprintf("/%s/yep", defaultBucket)).String(), maskReader(bytes.NewReader(body)))
+	ts.OK(err)
+	client.SetHeaders(rq, body)
+	rq.Header.Del("Content-Length")
+	rs, err := client.Do(rq)
+	ts.OK(err)
+	_ = rs.Body.Close()
+	if rs.StatusCode != http.StatusOK {
+		t.Fatal("expected status 200, found", rs.StatusCode)
+	}
+	ts.assertObject(defaultBucket, "yep", nil, "hello")
 }
 
 func TestCreateObjectWithInvalidContentLength(t *testing.T) {

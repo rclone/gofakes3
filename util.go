@@ -35,13 +35,14 @@ const readAllPrealloc = 1024 * 1024
 //
 // As size usually comes from a request header it isn't trusted: at most
 // readAllPrealloc is allocated up front, and the buffer only grows beyond
-// that as the data arrives. A negative size gives ErrInvalidArgument.
+// that as the data arrives. A negative size means the size isn't known
+// and r is read to EOF.
 //
 // It also reports S3-specific errors in certain conditions, like
 // ErrIncompleteBody.
 func ReadAll(r io.Reader, size int64) (b []byte, err error) {
 	if size < 0 {
-		return nil, ErrInvalidArgument
+		return io.ReadAll(r)
 	}
 	b = make([]byte, 0, min(size, readAllPrealloc))
 	for int64(len(b)) < size {

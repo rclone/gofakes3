@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -795,15 +796,17 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 		return err
 	}
 
-	contentLength := r.Header.Get("Content-Length")
-	if contentLength == "" {
+	// The size is unknown (-1) if the body is sent with chunked transfer
+	// encoding rather than a Content-Length
+	size := int64(-1)
+	if contentLength := r.Header.Get("Content-Length"); contentLength != "" {
+		size, err = strconv.ParseInt(contentLength, 10, 64)
+		if err != nil || size < 0 {
+			w.WriteHeader(http.StatusBadRequest) // XXX: no code for this, according to s3tests
+			return nil
+		}
+	} else if !slices.Contains(r.TransferEncoding, "chunked") {
 		return ErrMissingContentLength
-	}
-
-	size, err := strconv.ParseInt(contentLength, 10, 64)
-	if err != nil || size < 0 {
-		w.WriteHeader(http.StatusBadRequest) // XXX: no code for this, according to s3tests
-		return nil
 	}
 
 	if len(object) > KeySizeLimit {
@@ -838,7 +841,9 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 	}
 
 	// Ensure reader only contains object (strips the trailing headers)
-	reader = io.LimitReader(reader, size)
+	if size >= 0 {
+		reader = io.LimitReader(reader, size)
+	}
 
 	// hashingReader is still needed to get the ETag even if integrityCheck
 	// is set to false:

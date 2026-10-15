@@ -225,7 +225,9 @@ type Backend interface {
 	// may be nil.
 	//
 	// The size can be used if the backend needs to read the whole reader; use
-	// gofakes3.ReadAll() for this job rather than ioutil.ReadAll().
+	// gofakes3.ReadAll() for this job rather than ioutil.ReadAll(). It is -1
+	// if the size isn't known in advance, in which case the input must be
+	// read to EOF.
 	PutObject(ctx context.Context, bucketName, key string, meta map[string]string, input io.Reader, size int64) (PutObjectResult, error)
 
 	DeleteMulti(ctx context.Context, bucketName string, objects ...string) (MultiDeleteResult, error)
