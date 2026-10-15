@@ -257,6 +257,11 @@ func TestCompleteMultipartUploadAgain(t *testing.T) {
 	if *first.ETag != *again.ETag {
 		t.Errorf("ETag: first %s again %s", *first.ETag, *again.ETag)
 	}
+	head, err := svc.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(defaultBucket), Key: aws.String("foo")})
+	ts.OK(err)
+	if *first.ETag != *head.ETag {
+		t.Errorf("ETag: complete %s head %s", *first.ETag, *head.ETag)
+	}
 	ts.assertObject(defaultBucket, "foo", nil, "abcdef")
 
 	// The upload is gone though

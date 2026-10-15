@@ -867,7 +867,7 @@ func (g *GoFakeS3) createObjectBrowserUpload(bucket string, w http.ResponseWrite
 		w.Header().Set("x-amz-version-id", string(result.VersionID))
 	}
 
-	w.Header().Set("ETag", `"`+hex.EncodeToString(rdr.Sum(nil))+`"`)
+	w.Header().Set("ETag", putObjectETag(result, rdr))
 	return nil
 }
 
@@ -985,9 +985,18 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 		g.log.Print(LogInfo, "CREATED VERSION:", bucket, object, result.VersionID)
 		w.Header().Set("x-amz-version-id", string(result.VersionID))
 	}
-	w.Header().Set("ETag", `"`+hex.EncodeToString(rdr.Sum(nil))+`"`)
+	w.Header().Set("ETag", putObjectETag(result, rdr))
 
 	return nil
+}
+
+// putObjectETag returns the ETag of the object PutObject made with
+// result from the body read through rdr.
+func putObjectETag(result PutObjectResult, rdr *hashingReader) string {
+	if result.ETag != "" {
+		return result.ETag
+	}
+	return `"` + hex.EncodeToString(rdr.Sum(nil)) + `"`
 }
 
 // CopyObject copies an existing S3 object
@@ -1532,6 +1541,11 @@ func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID Uploa
 	result, err := g.storage.PutObject(r.Context(), bucket, object, upload.Meta, bytes.NewReader(fileBody), int64(len(fileBody)))
 	if err != nil {
 		return err
+	}
+	if result.ETag != "" {
+		etag = result.ETag
+	} else {
+		etag = `"` + etag + `"`
 	}
 	// Consume from the uploader only after PutObject has succeeded.
 	if _, err := g.uploader.Complete(owner, bucket, object, uploadID); err != nil {

@@ -1682,3 +1682,31 @@ func TestGetObjectCloseFailure(t *testing.T) {
 		t.Fatalf("expected status 200 and body %q, got %d and %q", "hello", rec.Code, rec.Body.String())
 	}
 }
+
+// etagBackend returns its own ETag for the objects it puts.
+type etagBackend struct {
+	*s3mem.Backend
+}
+
+func (b *etagBackend) PutObject(ctx context.Context, bucketName, key string, meta map[string]string, input io.Reader, size int64) (gofakes3.PutObjectResult, error) {
+	result, err := b.Backend.PutObject(ctx, bucketName, key, meta, input, size)
+	result.ETag = `"backend-etag"`
+	return result, err
+}
+
+// TestPutObjectBackendETag checks PutObject returns the ETag the
+// backend gives.
+func TestPutObjectBackendETag(t *testing.T) {
+	ts := newTestServer(t, withBackend(&etagBackend{s3mem.New()}))
+	defer ts.Close()
+
+	out, err := ts.s3Client().PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket: aws.String(defaultBucket),
+		Key:    aws.String("object"),
+		Body:   bytes.NewReader([]byte("hello")),
+	})
+	ts.OK(err)
+	if etag := aws.ToString(out.ETag); etag != `"backend-etag"` {
+		t.Errorf("expected the backend's ETag, got %q", etag)
+	}
+}

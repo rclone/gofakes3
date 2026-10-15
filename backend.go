@@ -127,6 +127,11 @@ type PutObjectResult struct {
 	// created version ID. If versioning is not enabled, this should be
 	// empty.
 	VersionID VersionID
+
+	// ETag is the quoted ETag of the created object, if the backend
+	// returns a different one from the MD5 of the body. If empty, the
+	// MD5 of the body is returned as the ETag.
+	ETag string
 }
 
 // Backend provides a set of operations to be implemented in order to support
