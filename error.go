@@ -96,6 +96,10 @@ const (
 	// No need to retransmit the object
 	ErrNotModified ErrorCode = "NotModified"
 
+	// ErrPreconditionFailed is returned when a condition given in the
+	// request, such as If-Match, isn't met.
+	ErrPreconditionFailed ErrorCode = "PreconditionFailed"
+
 	ErrRequestTimeTooSkewed ErrorCode = "RequestTimeTooSkewed"
 	ErrTooManyBuckets       ErrorCode = "TooManyBuckets"
 	ErrNotImplemented       ErrorCode = "NotImplemented"
@@ -292,6 +296,9 @@ func (e ErrorCode) Status() int {
 
 	case ErrNotModified:
 		return http.StatusNotModified
+
+	case ErrPreconditionFailed:
+		return http.StatusPreconditionFailed
 
 	case ErrMissingContentLength:
 		return http.StatusLengthRequired

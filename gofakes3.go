@@ -220,12 +220,15 @@ func (g *GoFakeS3) httpError(w http.ResponseWriter, r *http.Request, err error) 
 		g.log.Print(LogErr, err)
 	}
 
-	if r.Method != http.MethodHead {
+	status := resp.ErrorCode().Status()
+	// HEAD responses and 304 Not Modified have no body
+	hasBody := r.Method != http.MethodHead && status != http.StatusNotModified
+	if hasBody {
 		w.Header().Set("Content-Type", "application/xml")
 	}
-	w.WriteHeader(resp.ErrorCode().Status())
+	w.WriteHeader(status)
 
-	if r.Method != http.MethodHead {
+	if hasBody {
 		if err := g.xmlEncoder(w).Encode(resp); err != nil {
 			g.log.Print(LogErr, err)
 			return
@@ -600,8 +603,8 @@ func (g *GoFakeS3) writeGetOrHeadObjectResponse(obj *Object, w http.ResponseWrit
 	etag := `"` + hex.EncodeToString(obj.Hash) + `"`
 	w.Header().Set("ETag", etag)
 
-	if r.Header.Get("If-None-Match") == etag {
-		return ErrNotModified
+	if err := checkConditions(r.Header, getConditions, etag, objectLastModified(obj), ErrNotModified); err != nil {
+		return err
 	}
 
 	w.Header().Set("Accept-Ranges", "bytes")
@@ -837,6 +840,10 @@ func (g *GoFakeS3) copyObject(bucket, object string, meta map[string]string, w h
 	ctx := r.Context()
 	srcObj, err := g.storage.HeadObject(ctx, srcBucket, srcKey)
 	if err != nil {
+		return err
+	}
+	srcETag := `"` + hex.EncodeToString(srcObj.Hash) + `"`
+	if err := checkConditions(r.Header, copySourceConditions, srcETag, objectLastModified(srcObj), ErrPreconditionFailed); err != nil {
 		return err
 	}
 
