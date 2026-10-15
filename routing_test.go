@@ -2,6 +2,9 @@ package gofakes3_test
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -136,4 +139,68 @@ func TestRoutingUnsupportedSubresources(t *testing.T) {
 			t.Fatal("expected NoSuchBucket, found", err)
 		}
 	})
+}
+
+// TestRoutingMisusedSubresources checks requests for implemented
+// sub-resources with a method they aren't implemented for are refused,
+// and don't touch the object or bucket they name.
+func TestRoutingMisusedSubresources(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	ts.backendPutString(defaultBucket, "object", nil, "hello")
+	client := httpClient()
+
+	for _, test := range []struct {
+		method string
+		url    string
+	}{
+		{"PUT", defaultBucket + "/object?attributes"},
+		{"DELETE", defaultBucket + "/object?attributes"},
+		{"PUT", defaultBucket + "/object?location"},
+		{"DELETE", defaultBucket + "/object?delete"},
+		{"DELETE", defaultBucket + "?location"},
+		{"DELETE", defaultBucket + "?delete"},
+		{"PUT", defaultBucket + "?attributes"},
+	} {
+		t.Run(test.method+" "+test.url, func(t *testing.T) {
+			rq, err := http.NewRequest(test.method, ts.url(test.url), strings.NewReader("data"))
+			ts.OK(err)
+			rs, err := client.Do(rq)
+			ts.OK(err)
+			_ = rs.Body.Close()
+			if rs.StatusCode != http.StatusBadRequest {
+				t.Error("expected status 400, found", rs.StatusCode)
+			}
+			// Check the bucket and object are untouched, restoring
+			// them for the next test if not
+			ctx := context.Background()
+			if exists, _ := ts.backend.BucketExists(ctx, defaultBucket); !exists {
+				t.Error("bucket deleted")
+				ts.OK(ts.backend.CreateBucket(ctx, defaultBucket))
+			}
+			obj, err := ts.backend.GetObject(ctx, defaultBucket, "object", nil)
+			if err != nil {
+				t.Error("object not found:", err)
+			} else {
+				data, _ := io.ReadAll(obj.Contents)
+				_ = obj.Contents.Close()
+				if string(data) != "hello" {
+					t.Errorf("object changed to %q", data)
+				}
+			}
+			ts.backendPutString(defaultBucket, "object", nil, "hello")
+		})
+	}
+
+	// The methods they are implemented for still work
+	for _, url := range []string{defaultBucket + "/object?attributes", defaultBucket + "?location"} {
+		rq, err := http.NewRequest("HEAD", ts.url(url), nil)
+		ts.OK(err)
+		rs, err := client.Do(rq)
+		ts.OK(err)
+		_ = rs.Body.Close()
+		if rs.StatusCode != http.StatusOK {
+			t.Error(url, "expected status 200, found", rs.StatusCode)
+		}
+	}
 }

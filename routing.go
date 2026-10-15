@@ -39,6 +39,10 @@ func (g *GoFakeS3) routeBase(w http.ResponseWriter, r *http.Request) {
 	} else if sub := unsupportedSubresource(query); sub != "" {
 		err = g.routeUnsupported(bucket, object, sub, w, r)
 
+	} else if sub := misusedSubresource(query, object != "", r.Method); bucket != "" && sub != "" {
+		g.log.Print(LogInfo, "sub-resource", sub, "used with", r.Method, r.URL.Path)
+		err = ErrMethodNotAllowed
+
 	} else if uploadID := UploadID(query.Get("uploadId")); uploadID != "" {
 		err = g.routeMultipartUpload(bucket, object, uploadID, w, r)
 
@@ -227,6 +231,39 @@ var unsupportedSubresources = []string{
 func unsupportedSubresource(query url.Values) string {
 	for _, sub := range unsupportedSubresources {
 		if _, ok := query[sub]; ok {
+			return sub
+		}
+	}
+	return ""
+}
+
+// subresourceMethods are the methods the sub-resources which are
+// implemented by the object and bucket routes are implemented for, on
+// objects and on buckets.
+var subresourceMethods = map[string]struct{ object, bucket string }{
+	"attributes": {object: "GET"},
+	"delete":     {bucket: "POST"},
+	"location":   {bucket: "GET"},
+}
+
+// misusedSubresource returns the first sub-resource named in query
+// which isn't implemented for method on an object, if isObject, or on
+// a bucket, or "" if there is none.
+//
+// These requests must not be handled as plain object or bucket
+// requests either, as that would, for example, delete the bucket for a
+// DELETE ?location.
+func misusedSubresource(query url.Values, isObject bool, method string) string {
+	for sub, methods := range subresourceMethods {
+		if _, ok := query[sub]; !ok {
+			continue
+		}
+		allowed := methods.bucket
+		if isObject {
+			allowed = methods.object
+		}
+		// HEAD is answered as the plain object or bucket request
+		if method != allowed && !(method == "HEAD" && allowed == "GET") {
 			return sub
 		}
 	}
