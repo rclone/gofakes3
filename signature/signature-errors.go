@@ -19,9 +19,10 @@ type APIError struct {
 
 // the format of error response
 type errorResponse struct {
-	XMLName xml.Name `xml:"Error"`
-	Code    string
-	Message string
+	XMLName   xml.Name `xml:"Error"`
+	Code      string
+	Message   string
+	RequestID string `xml:"RequestId,omitempty"`
 }
 
 type errorCodeMap map[ErrorCode]APIError
@@ -43,6 +44,10 @@ const (
 	errUnsupportAlgorithm
 	errSignatureDoesNotMatch
 	errExpiredRequest
+	errAnonymous
+	errInvalidExpires
+	errRequestNotYetValid
+	errRequestTimeTooSkewed
 
 	// ErrNone is None(err=nil)
 	ErrNone
@@ -104,7 +109,7 @@ var errorCodes = errorCodeMap{
 	errMissingDateHeader: {
 		Code:           "AccessDenied",
 		Description:    "AWS authentication requires a valid Date or x-amz-date header",
-		HTTPStatusCode: http.StatusBadRequest,
+		HTTPStatusCode: http.StatusForbidden,
 	},
 	errMalformedDate: {
 		Code:           "MalformedDate",
@@ -128,8 +133,28 @@ var errorCodes = errorCodeMap{
 	},
 	errExpiredRequest: {
 		Code:           "AccessDenied",
-		Description:    "The difference between the request time and the server's time exceeds the maximum allowed.",
-		HTTPStatusCode: http.StatusBadRequest,
+		Description:    "Request has expired",
+		HTTPStatusCode: http.StatusForbidden,
+	},
+	errAnonymous: {
+		Code:           "AccessDenied",
+		Description:    "Access Denied",
+		HTTPStatusCode: http.StatusForbidden,
+	},
+	errInvalidExpires: {
+		Code:           "AccessDenied",
+		Description:    "X-Amz-Expires must be between 1 and 604800 seconds",
+		HTTPStatusCode: http.StatusForbidden,
+	},
+	errRequestNotYetValid: {
+		Code:           "AccessDenied",
+		Description:    "Request is not valid yet",
+		HTTPStatusCode: http.StatusForbidden,
+	},
+	errRequestTimeTooSkewed: {
+		Code:           "RequestTimeTooSkewed",
+		Description:    "The difference between the request time and the current time is too large.",
+		HTTPStatusCode: http.StatusForbidden,
 	},
 }
 
@@ -152,8 +177,15 @@ func GetAPIError(errCode ErrorCode) APIError {
 
 // EncodeAPIErrorToResponse encodes APIerror to http response
 func EncodeAPIErrorToResponse(err APIError) []byte {
+	return EncodeAPIErrorToResponseWithRequestID(err, "")
+}
+
+// EncodeAPIErrorToResponseWithRequestID encodes APIerror to http
+// response including the request ID if it isn't empty.
+func EncodeAPIErrorToResponseWithRequestID(err APIError, requestID string) []byte {
 	return EncodeResponse(errorResponse{
-		Code:    err.Code,
-		Message: err.Description,
+		Code:      err.Code,
+		Message:   err.Description,
+		RequestID: requestID,
 	})
 }

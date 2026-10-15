@@ -105,7 +105,20 @@ func (g *GoFakeS3) Server() http.Handler {
 		handler = g.hostBucketMiddleware(handler)
 	}
 
-	return g.authMiddleware(handler)
+	return g.requestIDMiddleware(g.authMiddleware(handler))
+}
+
+// requestIDMiddleware gives each response a request ID, which is also
+// returned in any error response.
+func (g *GoFakeS3) requestIDMiddleware(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, rq *http.Request) {
+		hdr := w.Header()
+		id := fmt.Sprintf("%016X", g.nextRequestID())
+		hdr.Set("x-amz-id-2", base64.StdEncoding.EncodeToString([]byte(id+id+id+id))) // x-amz-id-2 is 48 bytes of random stuff
+		hdr.Set("x-amz-request-id", id)
+		hdr.Set("Server", "AmazonS3")
+		handler.ServeHTTP(w, rq)
+	})
 }
 
 // AddAuthKeys adds access key ID to secret pairs which this instance
@@ -153,9 +166,9 @@ func (g *GoFakeS3) authMiddleware(handler http.Handler) http.Handler {
 				g.log.Print(LogWarn, "Access Denied:", rq.RemoteAddr, "=>", rq.URL)
 
 				resp := signature.GetAPIError(result)
+				w.Header().Set("Content-Type", "application/xml")
 				w.WriteHeader(resp.HTTPStatusCode)
-				w.Header().Add("content-type", "application/xml")
-				_, _ = w.Write(signature.EncodeAPIErrorToResponse(resp))
+				_, _ = w.Write(signature.EncodeAPIErrorToResponseWithRequestID(resp, w.Header().Get("x-amz-request-id")))
 				return
 			}
 		}
@@ -202,11 +215,14 @@ func (g *GoFakeS3) hostBucketMiddleware(handler http.Handler) http.Handler {
 }
 
 func (g *GoFakeS3) httpError(w http.ResponseWriter, r *http.Request, err error) {
-	resp := ensureErrorResponse(err, "") // FIXME: request id
+	resp := ensureErrorResponse(err, w.Header().Get("x-amz-request-id"))
 	if resp.ErrorCode() == ErrInternal {
 		g.log.Print(LogErr, err)
 	}
 
+	if r.Method != http.MethodHead {
+		w.Header().Set("Content-Type", "application/xml")
+	}
 	w.WriteHeader(resp.ErrorCode().Status())
 
 	if r.Method != http.MethodHead {

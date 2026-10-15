@@ -2,6 +2,8 @@ package gofakes3_test
 
 import (
 	"context"
+	"encoding/xml"
+	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -75,5 +77,57 @@ func TestAuthKeysPerInstance(t *testing.T) {
 	// Removing a key from A must not affect B's keys
 	if got := signedGet(t, tsB.server.URL, "KEYB", "SECRETB"); got != http.StatusOK {
 		t.Errorf("B with B's key after A removed a key: got status %d, want 200", got)
+	}
+}
+
+// TestErrorRequestID checks error responses, including those from
+// failed authentication, have the request ID in their header and body
+// and an XML content type.
+func TestErrorRequestID(t *testing.T) {
+	ts := newTestServer(t, withFakerOptions(gofakes3.WithV4Auth(map[string]string{"KEYA": "SECRETA"})))
+	defer ts.Close()
+
+	for _, test := range []struct {
+		name   string
+		sign   bool
+		status int
+		code   string
+	}{
+		{"anonymous", false, http.StatusForbidden, "AccessDenied"},
+		{"no such key", true, http.StatusNotFound, "NoSuchKey"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, ts.server.URL+"/"+defaultBucket+"/missing", nil)
+			ts.OK(err)
+			if test.sign {
+				req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+				creds := aws.Credentials{AccessKeyID: "KEYA", SecretAccessKey: "SECRETA"}
+				ts.OK(v4.NewSigner().SignHTTP(context.Background(), creds, req, "UNSIGNED-PAYLOAD", "s3", "us-east-1", time.Now()))
+			}
+			resp, err := http.DefaultClient.Do(req)
+			ts.OK(err)
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			ts.OK(err)
+
+			if resp.StatusCode != test.status {
+				t.Errorf("status: want %d got %d", test.status, resp.StatusCode)
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != "application/xml" {
+				t.Errorf("Content-Type: want application/xml got %q", ct)
+			}
+			var result struct {
+				Code      string
+				RequestID string `xml:"RequestId"`
+			}
+			ts.OK(xml.Unmarshal(body, &result))
+			if result.Code != test.code {
+				t.Errorf("Code: want %q got %q", test.code, result.Code)
+			}
+			id := resp.Header.Get("x-amz-request-id")
+			if id == "" || result.RequestID != id {
+				t.Errorf("RequestId: header %q body %q", id, result.RequestID)
+			}
+		})
 	}
 }

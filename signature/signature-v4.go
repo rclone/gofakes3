@@ -37,6 +37,18 @@ const (
 	amzSignedHeaders = "X-Amz-SignedHeaders"
 	amzSignature     = "X-Amz-Signature"
 	amzExpires       = "X-Amz-Expires"
+
+	// maxPresignExpires is the longest a presigned URL can be valid
+	// for, as on AWS.
+	maxPresignExpires = 7 * 24 * time.Hour
+
+	// defaultPresignExpires is how long a presigned URL without an
+	// X-Amz-Expires parameter is valid for.
+	defaultPresignExpires = 15 * time.Minute
+
+	// maxSkew is the furthest the time a request was signed may be
+	// from the current time, as on AWS.
+	maxSkew = 15 * time.Minute
 )
 
 // getCanonicalHeaders generate a list of request headers with their values
@@ -138,6 +150,36 @@ func getSigningKey(secretKey string, t time.Time, region string) []byte {
 	return signingKey
 }
 
+// requestTime returns the time the request was signed.
+//
+// This is in X-Amz-Date in the query of a presigned request. Otherwise
+// it is in the X-Amz-Date header in ISO 8601 format, or if that is
+// missing, the Date header in HTTP format.
+func requestTime(r *http.Request, presigned bool) (t time.Time, Err ErrorCode) {
+	var date string
+	var parse func(string) (time.Time, error)
+	switch {
+	case presigned:
+		date = r.URL.Query().Get(amzDate)
+	case r.Header.Get(amzDate) != "":
+		date = r.Header.Get(amzDate)
+	default:
+		date = r.Header.Get(headerDate)
+		parse = http.ParseTime
+	}
+	if date == "" {
+		return t, errMissingDateHeader
+	}
+	t, err := time.Parse(iso8601Format, date)
+	if err != nil && parse != nil {
+		t, err = parse(date)
+	}
+	if err != nil {
+		return t, errMalformedDate
+	}
+	return t, ErrNone
+}
+
 // V4SignVerify - Verify authorization header with calculated header in accordance with
 //   - http://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html
 //
@@ -198,13 +240,21 @@ func v4SignVerify(r *http.Request, getSecret func(accessKey string) (string, Err
 	v4Auth := req.Header.Get(headerAuth)
 
 	// If the header is empty but the query string has the signature, then it's QueryString authentication. (https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html)
+	presigned := false
 	if v4Auth == "" && queryf.Get(amzSignature) != "" {
 		// QueryString authentications are always "UNSIGNED-PAYLOAD".
+		presigned = true
 		isUnsignedPayload = true
 		v4Auth = fmt.Sprintf("%s Credential=%s, SignedHeaders=%s, Signature=%s", queryf.Get(amzAlgorithm), queryf.Get(amzCredential), queryf.Get(amzSignedHeaders), queryf.Get(amzSignature))
 		if queryf.Get(amzCredential) == "" {
 			return errMissingCredTag
 		}
+	}
+
+	// A request without any credentials is anonymous, which isn't
+	// allowed.
+	if v4Auth == "" {
+		return errAnonymous
 	}
 
 	// Parse signature version '4' header.
@@ -224,41 +274,39 @@ func v4SignVerify(r *http.Request, getSecret func(accessKey string) (string, Err
 		return ErrCode
 	}
 
-	// Extract date from various possible sources
-	date := req.Header.Get(amzDate)
-	if date == "" {
-		date = req.Header.Get(headerDate)
-	}
-	if date == "" {
-		date = queryf.Get(amzDate)
+	// Find the time the request was signed
+	t, Err := requestTime(&req, presigned)
+	if Err != ErrNone {
+		return Err
 	}
 
-	// If date is still empty after checking all sources, return an error
-	if date == "" {
-		return errMissingDateHeader
-	}
-
-	// Parse date header.
-	t, e := time.Parse(iso8601Format, date)
-	if e != nil {
-		return errMalformedDate
-	}
-
-	// Check expiration
-	expiresStr := queryf.Get(amzExpires)
-	var expires time.Duration
-	if expiresStr == "" {
-		// If expires is not set, use the default of 15 minutes
-		expires = 15 * time.Minute
-	} else {
-		expiresInt, err := strconv.ParseInt(expiresStr, 10, 64)
-		if err != nil {
-			return errMalformedExpires
+	// Check the request is valid now
+	now := TimeNow()
+	if presigned {
+		// A missing X-Amz-Expires is taken to mean the default
+		expires := defaultPresignExpires
+		if expiresStr := queryf.Get(amzExpires); expiresStr != "" {
+			expiresInt, err := strconv.ParseInt(expiresStr, 10, 64)
+			if err != nil {
+				return errMalformedExpires
+			}
+			// Check before converting, which could overflow
+			if expiresInt > int64(maxPresignExpires/time.Second) {
+				return errInvalidExpires
+			}
+			expires = time.Duration(expiresInt) * time.Second
 		}
-		expires = time.Duration(expiresInt) * time.Second
-	}
-	if TimeNow().After(t.Add(expires)) {
-		return errExpiredRequest
+		if expires < time.Second || expires > maxPresignExpires {
+			return errInvalidExpires
+		}
+		if t.Sub(now) > maxSkew {
+			return errRequestNotYetValid
+		}
+		if now.After(t.Add(expires)) {
+			return errExpiredRequest
+		}
+	} else if skew := now.Sub(t); skew > maxSkew || skew < -maxSkew {
+		return errRequestTimeTooSkewed
 	}
 
 	// Query string.

@@ -3,11 +3,14 @@ package signature_test
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,17 +191,21 @@ func TestCheckExpiration(t *testing.T) {
 		expectedError  bool
 	}{
 		{
-			name:           "Valid Header-based Authentication (Default 15min)",
+			name:           "Valid Header-based Authentication",
 			useQueryString: false,
-			expiresIn:      "",
 			timeDelta:      14 * time.Minute,
 			expectedError:  false,
 		},
 		{
-			name:           "Expired Header-based Authentication (Default 15min)",
+			name:           "Expired Header-based Authentication",
 			useQueryString: false,
-			expiresIn:      "",
 			timeDelta:      16 * time.Minute,
+			expectedError:  true,
+		},
+		{
+			name:           "Future Header-based Authentication",
+			useQueryString: false,
+			timeDelta:      -16 * time.Minute,
 			expectedError:  true,
 		},
 		{
@@ -230,6 +237,56 @@ func TestCheckExpiration(t *testing.T) {
 			expectedError:  true,
 		},
 		{
+			name:           "Valid Query-based Authentication (7 days)",
+			useQueryString: true,
+			expiresIn:      "604800",
+			timeDelta:      0,
+			expectedError:  false,
+		},
+		{
+			name:           "Query-based Authentication over 7 days",
+			useQueryString: true,
+			expiresIn:      "604801",
+			timeDelta:      0,
+			expectedError:  true,
+		},
+		{
+			// 3600 + 2^55 seconds overflows to 1 hour in nanoseconds
+			name:           "Query-based Authentication with overflowing expiry",
+			useQueryString: true,
+			expiresIn:      "36028797018967568",
+			timeDelta:      0,
+			expectedError:  true,
+		},
+		{
+			name:           "Query-based Authentication expiring immediately",
+			useQueryString: true,
+			expiresIn:      "0",
+			timeDelta:      0,
+			expectedError:  true,
+		},
+		{
+			name:           "Query-based Authentication with negative expiry",
+			useQueryString: true,
+			expiresIn:      "-7",
+			timeDelta:      0,
+			expectedError:  true,
+		},
+		{
+			name:           "Query-based Authentication not valid yet",
+			useQueryString: true,
+			expiresIn:      "3600",
+			timeDelta:      -16 * time.Minute,
+			expectedError:  true,
+		},
+		{
+			name:           "Query-based Authentication with small clock skew",
+			useQueryString: true,
+			expiresIn:      "3600",
+			timeDelta:      -14 * time.Minute,
+			expectedError:  false,
+		},
+		{
 			name:           "Malformed Expires",
 			useQueryString: true,
 			expiresIn:      "not-a-number",
@@ -253,7 +310,7 @@ func TestCheckExpiration(t *testing.T) {
 			signature.ReloadKeys(map[string]string{ak: sk})
 			signer := v4signer.NewSigner()
 
-			req, err := http.NewRequest(http.MethodPost, "https://s3-endpoint.example.com/bin", Body)
+			req, err := http.NewRequest(http.MethodGet, "https://s3-endpoint.example.com/bin", Body)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -262,22 +319,22 @@ func TestCheckExpiration(t *testing.T) {
 			signature.TimeNow = func() time.Time { return now }
 
 			if tc.useQueryString {
-				// For query-based authentication
 				req.URL.RawQuery = url.Values{
-					"X-Amz-Algorithm":     []string{signV4Algorithm},
-					"X-Amz-Credential":    []string{fmt.Sprintf("%s/%s/%s/%s/aws4_request", ak, now.Format(yyyymmdd), region, serviceS3)},
-					"X-Amz-Date":          []string{now.Format(iso8601Format)},
-					"X-Amz-Expires":       []string{tc.expiresIn},
-					"X-Amz-SignedHeaders": []string{"host"},
+					"X-Amz-Expires": []string{tc.expiresIn},
 				}.Encode()
+				signedURI, _, err := signer.PresignHTTP(ctx, creds, req, "UNSIGNED-PAYLOAD", serviceS3, region, now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req, err = http.NewRequest(http.MethodGet, signedURI, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
 			} else {
-				// For header-based authentication
-				req.Header.Set("X-Amz-Date", now.Format(iso8601Format))
-			}
-
-			err = signer.SignHTTP(ctx, creds, req, bodyHash, serviceS3, region, now)
-			if err != nil {
-				t.Fatal(err)
+				err = signer.SignHTTP(ctx, creds, req, bodyHash, serviceS3, region, now)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			// Mock time passing
@@ -288,8 +345,72 @@ func TestCheckExpiration(t *testing.T) {
 				t.Errorf("invalid result: expected error but got no error")
 			}
 			if result != signature.ErrNone && !tc.expectedError {
-				t.Errorf("invalid result: didn't expect error but got error")
+				t.Errorf("invalid result: didn't expect error but got error %v", signature.GetAPIError(result))
 			}
 		})
+	}
+}
+
+// TestDateHeader checks a request signed with the time in the Date
+// header in HTTP format, which clients such as botocore do when given
+// a Date header, is accepted.
+func TestDateHeader(t *testing.T) {
+	originalTimeNow := signature.TimeNow
+	defer func() { signature.TimeNow = originalTimeNow }()
+	ak := RandString(32)
+	sk := RandString(64)
+	region := "us-east-1"
+	signature.ReloadKeys(map[string]string{ak: sk})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	signature.TimeNow = func() time.Time { return now }
+	date := now.Format(http.TimeFormat)
+	emptyHash := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	scope := now.Format(yyyymmdd) + "/" + region + "/s3/aws4_request"
+
+	sign := func(dateHeader string) *http.Request {
+		req, err := http.NewRequest(http.MethodGet, "https://s3-endpoint.example.com/bin", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Date", dateHeader)
+		canonicalRequest := strings.Join([]string{
+			"GET",
+			"/bin",
+			"",
+			"date:" + dateHeader + "\nhost:s3-endpoint.example.com\n",
+			"date;host",
+			emptyHash,
+		}, "\n")
+		crHash := sha256.Sum256([]byte(canonicalRequest))
+		stringToSign := "AWS4-HMAC-SHA256\n" + now.Format(iso8601Format) + "\n" + scope + "\n" + hex.EncodeToString(crHash[:])
+		key := []byte("AWS4" + sk)
+		for _, part := range []string{now.Format(yyyymmdd), region, "s3", "aws4_request", stringToSign} {
+			mac := hmac.New(sha256.New, key)
+			mac.Write([]byte(part))
+			key = mac.Sum(nil)
+		}
+		req.Header.Set("Authorization", fmt.Sprintf("AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=date;host, Signature=%s", ak, scope, hex.EncodeToString(key)))
+		return req
+	}
+
+	if result := signature.V4SignVerify(sign(date)); result != signature.ErrNone {
+		t.Fatalf("Date header in HTTP format: expected success, got %+v", signature.GetAPIError(result))
+	}
+	if result := signature.V4SignVerify(sign("not a date")); result == signature.ErrNone {
+		t.Fatal("malformed Date header: expected error, got success")
+	}
+}
+
+// TestAnonymous checks a request without credentials is refused with
+// 403 AccessDenied.
+func TestAnonymous(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "https://s3-endpoint.example.com/bin", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := signature.GetAPIError(signature.V4SignVerify(req))
+	if result.Code != "AccessDenied" || result.HTTPStatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 AccessDenied, got %+v", result)
 	}
 }
