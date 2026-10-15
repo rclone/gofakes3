@@ -487,6 +487,11 @@ type ObjectID struct {
 
 	// Versions not supported in GoFakeS3 yet.
 	VersionID string `xml:"VersionId,omitempty" json:"VersionId,omitempty"`
+
+	// Conditions on deleting the object in a DeleteRequest.
+	ETag             string `xml:"ETag,omitempty" json:"ETag,omitempty"`
+	LastModifiedTime string `xml:"LastModifiedTime,omitempty" json:"LastModifiedTime,omitempty"`
+	Size             *int64 `xml:"Size,omitempty" json:"Size,omitempty"`
 }
 
 type StorageClass string

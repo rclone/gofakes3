@@ -281,3 +281,80 @@ func TestCheckWriteConditions(t *testing.T) {
 	}
 	ts.assertObject(defaultBucket, "object", nil, "hello")
 }
+
+// TestConditionalDelete checks the conditions on DeleteObject and
+// DeleteObjects.
+func TestConditionalDelete(t *testing.T) {
+	ctx := context.Background()
+	ts := newTestServer(t)
+	defer ts.Close()
+	svc := ts.s3Client()
+	const etag = `"5d41402abc4b2a76b9719d911017c592"` // md5("hello")
+	put := func() {
+		_, err := svc.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(defaultBucket),
+			Key:    aws.String("object"),
+			Body:   bytes.NewReader([]byte("hello")),
+		})
+		ts.OK(err)
+	}
+	wrongTime := defaultDate.Add(time.Hour)
+
+	for _, test := range []struct {
+		name string
+		in   s3.DeleteObjectInput
+		fail bool
+	}{
+		{"if-match", s3.DeleteObjectInput{IfMatch: aws.String(etag)}, false},
+		{"if-match star", s3.DeleteObjectInput{IfMatch: aws.String("*")}, false},
+		{"if-match fail", s3.DeleteObjectInput{IfMatch: aws.String(`"bad"`)}, true},
+		{"if-match-size", s3.DeleteObjectInput{IfMatchSize: aws.Int64(5)}, false},
+		{"if-match-size fail", s3.DeleteObjectInput{IfMatchSize: aws.Int64(9999)}, true},
+		{"if-match-last-modified-time", s3.DeleteObjectInput{IfMatchLastModifiedTime: &defaultDate}, false},
+		{"if-match-last-modified-time fail", s3.DeleteObjectInput{IfMatchLastModifiedTime: &wrongTime}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			put()
+			in := test.in
+			in.Bucket, in.Key = aws.String(defaultBucket), aws.String("object")
+			_, err := svc.DeleteObject(ctx, &in)
+			if test.fail {
+				if !s3HasErrorCode(err, gofakes3.ErrPreconditionFailed) {
+					t.Fatal("expected PreconditionFailed, got", err)
+				}
+				ts.assertObject(defaultBucket, "object", nil, "hello")
+				return
+			}
+			ts.OK(err)
+			if ts.backendObjectExists(defaultBucket, "object") {
+				t.Fatal("object not deleted")
+			}
+			// Deleting a missing object succeeds whatever the conditions
+			_, err = svc.DeleteObject(ctx, &in)
+			ts.OK(err)
+		})
+	}
+
+	// DeleteObjects refuses the objects whose conditions fail
+	put()
+	ts.backendPutString(defaultBucket, "other", nil, "x")
+	out, err := svc.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		Bucket: aws.String(defaultBucket),
+		Delete: &types.Delete{Objects: []types.ObjectIdentifier{
+			{Key: aws.String("object"), ETag: aws.String(`"bad"`)},
+			{Key: aws.String("other"), Size: aws.Int64(1)},
+			{Key: aws.String("missing"), ETag: aws.String(`"bad"`)},
+		}},
+	})
+	ts.OK(err)
+	if len(out.Errors) != 1 || aws.ToString(out.Errors[0].Key) != "object" || aws.ToString(out.Errors[0].Code) != "PreconditionFailed" {
+		t.Errorf("unexpected errors %+v", out.Errors)
+	}
+	if len(out.Deleted) != 2 {
+		t.Errorf("unexpected deleted %+v", out.Deleted)
+	}
+	ts.assertObject(defaultBucket, "object", nil, "hello")
+	if ts.backendObjectExists(defaultBucket, "other") {
+		t.Error("other not deleted")
+	}
+}

@@ -1102,6 +1102,21 @@ func (g *GoFakeS3) deleteObject(bucket, object string, w http.ResponseWriter, r 
 		return err
 	}
 
+	c := deleteConditions{
+		etag:         r.Header.Get("If-Match"),
+		lastModified: r.Header.Get("X-Amz-If-Match-Last-Modified-Time"),
+	}
+	if v := r.Header.Get("X-Amz-If-Match-Size"); v != "" {
+		size, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return ErrorInvalidArgument("x-amz-if-match-size", v, "Invalid size")
+		}
+		c.size = &size
+	}
+	if err := g.checkDeleteConditions(r.Context(), bucket, object, c); err != nil {
+		return err
+	}
+
 	result, err := g.storage.DeleteObject(r.Context(), bucket, object)
 	if err != nil {
 		return err
@@ -1168,15 +1183,28 @@ func (g *GoFakeS3) deleteMulti(bucket string, w http.ResponseWriter, r *http.Req
 		return ErrorMessagef(ErrMalformedXML, "a maximum of %d keys can be deleted in one request", MaxDeleteObjects)
 	}
 
-	keys := make([]string, len(in.Objects))
-	for i, o := range in.Objects {
-		keys[i] = o.Key
+	// Objects whose conditions aren't met aren't deleted
+	keys := make([]string, 0, len(in.Objects))
+	var refused []ErrorResult
+	for _, o := range in.Objects {
+		c := deleteConditions{etag: o.ETag, lastModified: o.LastModifiedTime, size: o.Size}
+		if err := g.checkDeleteConditions(r.Context(), bucket, o.Key, c); err != nil {
+			result := ErrorResultFromError(err)
+			result.Key = o.Key
+			refused = append(refused, result)
+			continue
+		}
+		keys = append(keys, o.Key)
 	}
 
-	out, err := g.storage.DeleteMulti(r.Context(), bucket, keys...)
-	if err != nil {
-		return err
+	var out MultiDeleteResult
+	if len(keys) > 0 {
+		out, err = g.storage.DeleteMulti(r.Context(), bucket, keys...)
+		if err != nil {
+			return err
+		}
 	}
+	out.Error = append(out.Error, refused...)
 
 	if in.Quiet {
 		out.Deleted = nil

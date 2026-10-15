@@ -183,3 +183,47 @@ func (g *GoFakeS3) checkWriteConditions(r *http.Request, bucket, object string) 
 	}
 	return r.WithContext(context.WithValue(r.Context(), writeConditionsKey{}, c)), nil
 }
+
+// deleteConditions are the conditions on deleting an object.
+type deleteConditions struct {
+	etag         string
+	lastModified string // an HTTP or ISO 8601 date
+	size         *int64
+}
+
+// checkDeleteConditions checks the conditions c on deleting the object
+// at bucket/object. They are met if the object doesn't exist, as
+// deleting it does nothing.
+func (g *GoFakeS3) checkDeleteConditions(ctx context.Context, bucket, object string, c deleteConditions) error {
+	if c == (deleteConditions{}) {
+		return nil
+	}
+	obj, err := g.storage.HeadObject(ctx, bucket, object)
+	if HasErrorCode(err, ErrNoSuchKey) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if obj.Contents != nil {
+		_ = obj.Contents.Close()
+	}
+	if c.etag != "" && !etagMatches(c.etag, hex.EncodeToString(obj.Hash)) {
+		return ErrPreconditionFailed
+	}
+	if c.lastModified != "" {
+		t, err := http.ParseTime(c.lastModified)
+		if err != nil {
+			t, err = time.Parse(time.RFC3339Nano, c.lastModified)
+		}
+		if err != nil {
+			return ErrorInvalidArgument("LastModifiedTime", c.lastModified, "Invalid date")
+		}
+		if !objectLastModified(obj).Truncate(time.Second).Equal(t.Truncate(time.Second)) {
+			return ErrPreconditionFailed
+		}
+	}
+	if c.size != nil && *c.size != obj.Size {
+		return ErrPreconditionFailed
+	}
+	return nil
+}
