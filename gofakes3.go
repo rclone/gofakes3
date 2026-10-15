@@ -499,6 +499,9 @@ func (g *GoFakeS3) createBucket(bucket string, w http.ResponseWriter, r *http.Re
 	if err := ValidateBucketName(bucket); err != nil {
 		return err
 	}
+	if strings.EqualFold(r.Header.Get("X-Amz-Bucket-Object-Lock-Enabled"), "true") {
+		return ErrorMessage(ErrNotImplemented, "Object lock is not supported.")
+	}
 	if err := g.storage.CreateBucket(r.Context(), bucket); err != nil {
 		return err
 	}
@@ -788,6 +791,10 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 		return err
 	}
 
+	if err := checkWriteEncryption(r.Header); err != nil {
+		return err
+	}
+
 	if r.Header.Get("X-Amz-Copy-Source") != "" {
 		return g.copyObject(bucket, object, meta, w, r)
 	}
@@ -1063,6 +1070,9 @@ func (g *GoFakeS3) initiateMultipartUpload(bucket, object string, w http.Respons
 	if err := g.ensureBucketExists(r, bucket); err != nil {
 		return err
 	}
+	if err := checkWriteEncryption(r.Header); err != nil {
+		return err
+	}
 
 	var uploadID UploadID
 	if g.multipart != nil {
@@ -1108,6 +1118,10 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 	partNumber, err := strconv.ParseInt(r.URL.Query().Get("partNumber"), 10, 0)
 	if err != nil || partNumber <= 0 || partNumber > MaxUploadPartNumber {
 		return ErrInvalidPart
+	}
+
+	if err := checkWriteEncryption(r.Header); err != nil {
+		return err
 	}
 
 	upload, err := g.uploader.Get(g.owner(r.Context()), bucket, object, uploadID)

@@ -1533,14 +1533,14 @@ func TestObjectMetadataHeaders(t *testing.T) {
 	body := []byte("hello")
 	rq := client.Request("PUT", "/"+defaultBucket+"/object", body)
 	for k, v := range map[string]string{
-		"X-Amz-Meta-Foo":   "bar",
-		"Content-Type":     "text/plain",
-		"Content-Encoding": "gzip,aws-chunked",
-		"Cache-Control":    "no-cache",
-		"Expires":          "Thu, 01 Dec 2094 16:00:00 GMT",
-		"X-Amz-Server-Side-Encryption-Customer-Key": "c2VjcmV0",
-		"X-Amz-Checksum-Crc32":                      "AAAAAA==",
-		"X-Amz-Tagging":                             "k=v",
+		"X-Amz-Meta-Foo":               "bar",
+		"Content-Type":                 "text/plain",
+		"Content-Encoding":             "gzip,aws-chunked",
+		"Cache-Control":                "no-cache",
+		"Expires":                      "Thu, 01 Dec 2094 16:00:00 GMT",
+		"X-Amz-Server-Side-Encryption": "AES256",
+		"X-Amz-Checksum-Crc32":         "AAAAAA==",
+		"X-Amz-Tagging":                "k=v",
 	} {
 		rq.Header.Set(k, v)
 	}
@@ -1568,7 +1568,7 @@ func TestObjectMetadataHeaders(t *testing.T) {
 		}
 	}
 	for _, notWant := range []string{
-		"\r\nX-Amz-Server-Side-Encryption-Customer-Key:",
+		"\r\nX-Amz-Server-Side-Encryption:",
 		"\r\nX-Amz-Checksum-Crc32:",
 		"\r\nX-Amz-Tagging:",
 		"\r\nX-Amz-Date:",
