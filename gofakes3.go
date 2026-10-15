@@ -1240,7 +1240,15 @@ func (g *GoFakeS3) owner(ctx context.Context) string {
 func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID UploadID, w http.ResponseWriter, r *http.Request) error {
 	g.log.Print(LogInfo, "complete multipart upload", bucket, object, uploadID)
 
-	upload, err := g.uploader.Get(g.owner(r.Context()), bucket, object, uploadID)
+	owner := g.owner(r.Context())
+	upload, err := g.uploader.Get(owner, bucket, object, uploadID)
+	if err == ErrNoSuchUpload {
+		// Completing an upload again, as a client which didn't get the
+		// response to the first attempt would, succeeds as on S3
+		if completed, ok := g.uploader.Completed(owner, bucket, object, uploadID); ok {
+			return g.writeCompleteMultipartUploadResult(w, bucket, object, completed.versionID, completed.etag)
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -1262,17 +1270,11 @@ func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID Uploa
 		}
 		// Consume from the uploader only after the backend has acknowledged
 		// completion, so a backend error leaves the upload available for retry.
-		if _, err := g.uploader.Complete(g.owner(r.Context()), bucket, object, uploadID); err != nil {
+		if _, err := g.uploader.Complete(owner, bucket, object, uploadID); err != nil {
 			return err
 		}
-		if versionID != "" {
-			w.Header().Set("x-amz-version-id", string(versionID))
-		}
-		return g.xmlEncoder(w).Encode(&CompleteMultipartUploadResult{
-			ETag:   etag,
-			Bucket: bucket,
-			Key:    object,
-		})
+		g.uploader.RecordCompleted(owner, bucket, object, uploadID, versionID, etag)
+		return g.writeCompleteMultipartUploadResult(w, bucket, object, versionID, etag)
 	}
 
 	fileBody, etag, err := upload.Reassemble(&in)
@@ -1285,13 +1287,19 @@ func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID Uploa
 		return err
 	}
 	// Consume from the uploader only after PutObject has succeeded.
-	if _, err := g.uploader.Complete(g.owner(r.Context()), bucket, object, uploadID); err != nil {
+	if _, err := g.uploader.Complete(owner, bucket, object, uploadID); err != nil {
 		return err
 	}
-	if result.VersionID != "" {
-		w.Header().Set("x-amz-version-id", string(result.VersionID))
-	}
+	g.uploader.RecordCompleted(owner, bucket, object, uploadID, result.VersionID, etag)
+	return g.writeCompleteMultipartUploadResult(w, bucket, object, result.VersionID, etag)
+}
 
+// writeCompleteMultipartUploadResult writes the response to a
+// successful CompleteMultipartUpload.
+func (g *GoFakeS3) writeCompleteMultipartUploadResult(w http.ResponseWriter, bucket, object string, versionID VersionID, etag string) error {
+	if versionID != "" {
+		w.Header().Set("x-amz-version-id", string(versionID))
+	}
 	return g.xmlEncoder(w).Encode(&CompleteMultipartUploadResult{
 		ETag:   etag,
 		Bucket: bucket,

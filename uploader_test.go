@@ -229,3 +229,57 @@ func TestListMultipartUploadPartsPagination(t *testing.T) {
 		}
 	}
 }
+
+// TestCompleteMultipartUploadAgain checks completing an upload again,
+// as a client which didn't get the response would, succeeds with the
+// same result, but completing an aborted upload doesn't.
+func TestCompleteMultipartUploadAgain(t *testing.T) {
+	ctx := context.Background()
+	ts := newTestServer(t)
+	defer ts.Close()
+	svc := ts.s3Client()
+
+	id := ts.createMultipartUpload(defaultBucket, "foo", nil)
+	parts := []types.CompletedPart{
+		ts.uploadPart(defaultBucket, "foo", id, 1, []byte("abc")),
+		ts.uploadPart(defaultBucket, "foo", id, 2, []byte("def")),
+	}
+	in := &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(defaultBucket),
+		Key:             aws.String("foo"),
+		UploadId:        aws.String(id),
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+	}
+	first, err := svc.CompleteMultipartUpload(ctx, in)
+	ts.OK(err)
+	again, err := svc.CompleteMultipartUpload(ctx, in)
+	ts.OK(err)
+	if *first.ETag != *again.ETag {
+		t.Errorf("ETag: first %s again %s", *first.ETag, *again.ETag)
+	}
+	ts.assertObject(defaultBucket, "foo", nil, "abcdef")
+
+	// The upload is gone though
+	ts.assertListUploadPartsFails(gofakes3.ErrNoSuchUpload, defaultBucket, "foo", id, listUploadPartsOpts{})
+
+	// The result is only for the same key
+	in.Key = aws.String("bar")
+	_, err = svc.CompleteMultipartUpload(ctx, in)
+	if !s3HasErrorCode(err, gofakes3.ErrNoSuchUpload) {
+		t.Fatal("expected NoSuchUpload for a different key, got", err)
+	}
+
+	// An aborted upload can't be completed
+	id = ts.createMultipartUpload(defaultBucket, "foo", nil)
+	part := ts.uploadPart(defaultBucket, "foo", id, 1, []byte("abc"))
+	ts.assertAbortMultipartUpload(defaultBucket, "foo", gofakes3.UploadID(id))
+	_, err = svc.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(defaultBucket),
+		Key:             aws.String("foo"),
+		UploadId:        aws.String(id),
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: []types.CompletedPart{part}},
+	})
+	if !s3HasErrorCode(err, gofakes3.ErrNoSuchUpload) {
+		t.Fatal("expected NoSuchUpload after abort, got", err)
+	}
+}

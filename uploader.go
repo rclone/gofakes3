@@ -150,6 +150,29 @@ type uploader struct {
 
 	buckets map[uploadBucket]*bucketUploads
 	mu      sync.Mutex
+
+	// completed has the results of the most recently completed
+	// uploads, oldest first in completedOrder, so a repeated
+	// CompleteMultipartUpload can be answered.
+	completed      map[completedKey]completedUpload
+	completedOrder []completedKey
+}
+
+// maxCompleted is the number of completed uploads whose results are
+// kept.
+const maxCompleted = 1000
+
+// completedKey identifies a completed upload.
+type completedKey struct {
+	uploadBucket
+	object string
+	id     UploadID
+}
+
+// completedUpload is the result of a completed upload.
+type completedUpload struct {
+	versionID VersionID
+	etag      string
 }
 
 // uploadBucket identifies the uploads of one owner to one bucket.
@@ -163,9 +186,35 @@ type uploadBucket struct {
 
 func newUploader() *uploader {
 	return &uploader{
-		buckets:  make(map[uploadBucket]*bucketUploads),
-		uploadID: new(big.Int),
+		buckets:   make(map[uploadBucket]*bucketUploads),
+		uploadID:  new(big.Int),
+		completed: make(map[completedKey]completedUpload),
 	}
+}
+
+// RecordCompleted records the result of the upload id which has been
+// completed, so it can be returned if the client completes it again.
+func (u *uploader) RecordCompleted(owner, bucket, object string, id UploadID, versionID VersionID, etag string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	key := completedKey{uploadBucket{owner: owner, bucket: bucket}, object, id}
+	if _, found := u.completed[key]; !found {
+		u.completedOrder = append(u.completedOrder, key)
+	}
+	u.completed[key] = completedUpload{versionID: versionID, etag: etag}
+	if len(u.completedOrder) > maxCompleted {
+		delete(u.completed, u.completedOrder[0])
+		u.completedOrder = u.completedOrder[1:]
+	}
+}
+
+// Completed returns the result of the upload id if it was recently
+// completed.
+func (u *uploader) Completed(owner, bucket, object string, id UploadID) (result completedUpload, ok bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	result, ok = u.completed[completedKey{uploadBucket{owner: owner, bucket: bucket}, object, id}]
+	return result, ok
 }
 
 func (u *uploader) Begin(owner, bucket, object string, meta map[string]string, initiated time.Time) *multipartUpload {
