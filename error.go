@@ -18,6 +18,10 @@ const (
 	// The Content-MD5 you specified did not match what we received.
 	ErrBadDigest ErrorCode = "BadDigest"
 
+	// ErrBadRequest is returned for a request which is malformed in a
+	// way no more specific error describes.
+	ErrBadRequest ErrorCode = "BadRequest"
+
 	ErrBucketAlreadyExists ErrorCode = "BucketAlreadyExists"
 
 	// Raised when attempting to delete a bucket that still contains items.
@@ -246,6 +250,7 @@ func (e ErrorCode) Status() int {
 		return http.StatusConflict
 
 	case ErrBadDigest,
+		ErrBadRequest,
 		ErrEntityTooLarge,
 		ErrIllegalVersioningConfiguration,
 		ErrIncompleteBody,

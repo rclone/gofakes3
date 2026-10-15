@@ -27,9 +27,14 @@ var (
 	corsHeadersString = strings.Join(corsHeaders, ", ")
 )
 
+// withCORS adds the CORS headers to responses and answers CORS
+// preflight (OPTIONS) requests.
+//
+// Browsers don't authenticate preflight requests, so this must be
+// outside the authentication.
 type withCORS struct {
-	r   http.Handler
-	log Logger
+	r http.Handler
+	g *GoFakeS3
 }
 
 func (s *withCORS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -39,6 +44,9 @@ func (s *withCORS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Expose-Headers", "ETag")
 
 	if r.Method == "OPTIONS" {
+		if r.Header.Get("Origin") == "" || r.Header.Get("Access-Control-Request-Method") == "" {
+			s.g.httpError(w, r, ErrorMessage(ErrBadRequest, "Insufficient information. Origin request header needed."))
+		}
 		return
 	}
 

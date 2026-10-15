@@ -95,7 +95,7 @@ func (g *GoFakeS3) nextRequestID() uint64 {
 
 // Create the AWS S3 API
 func (g *GoFakeS3) Server() http.Handler {
-	var handler http.Handler = &withCORS{r: http.HandlerFunc(g.routeBase), log: g.log}
+	var handler http.Handler = http.HandlerFunc(g.routeBase)
 
 	if g.timeSkew != 0 {
 		handler = g.timeSkewMiddleware(handler)
@@ -105,7 +105,7 @@ func (g *GoFakeS3) Server() http.Handler {
 		handler = g.hostBucketMiddleware(handler)
 	}
 
-	return g.requestIDMiddleware(g.authMiddleware(handler))
+	return g.requestIDMiddleware(&withCORS{r: g.authMiddleware(handler), g: g})
 }
 
 // requestIDMiddleware gives each response a request ID, which is also

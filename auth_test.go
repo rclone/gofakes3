@@ -131,3 +131,41 @@ func TestErrorRequestID(t *testing.T) {
 		})
 	}
 }
+
+// TestCORSPreflight checks CORS preflight requests, which browsers
+// never authenticate, are answered without authentication, while other
+// requests still need it.
+func TestCORSPreflight(t *testing.T) {
+	ts := newTestServer(t, withFakerOptions(gofakes3.WithV4Auth(map[string]string{"KEYA": "SECRETA"})))
+	defer ts.Close()
+	url := ts.server.URL + "/" + defaultBucket + "/object"
+
+	for _, test := range []struct {
+		name    string
+		method  string
+		headers map[string]string
+		status  int
+	}{
+		{"preflight", "OPTIONS", map[string]string{"Origin": "https://example.com", "Access-Control-Request-Method": "GET"}, http.StatusOK},
+		{"preflight without origin", "OPTIONS", map[string]string{"Access-Control-Request-Method": "GET"}, http.StatusBadRequest},
+		{"preflight without method", "OPTIONS", map[string]string{"Origin": "https://example.com"}, http.StatusBadRequest},
+		{"unauthenticated GET", "GET", map[string]string{"Origin": "https://example.com"}, http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req, err := http.NewRequest(test.method, url, nil)
+			ts.OK(err)
+			for k, v := range test.headers {
+				req.Header.Set(k, v)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			ts.OK(err)
+			_ = resp.Body.Close()
+			if resp.StatusCode != test.status {
+				t.Errorf("status: want %d got %d", test.status, resp.StatusCode)
+			}
+			if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+				t.Errorf("Access-Control-Allow-Origin: want * got %q", got)
+			}
+		})
+	}
+}
