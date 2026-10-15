@@ -886,12 +886,23 @@ func (g *GoFakeS3) copyObject(bucket, object string, meta map[string]string, w h
 
 	// XXX No support for versionId subresource
 	parts := strings.SplitN(strings.TrimPrefix(source, "/"), "/", 2)
+	if len(parts) != 2 {
+		return ErrorInvalidArgument("x-amz-copy-source", source, "Copy Source must mention the source bucket and key: sourcebucket/sourcekey")
+	}
 	srcBucket := parts[0]
 	srcKey := strings.SplitN(parts[1], "?", 2)[0]
 
 	srcKey, err = url.QueryUnescape(srcKey)
 	if err != nil {
-		return err
+		return ErrorInvalidArgument("x-amz-copy-source", source, "Invalid copy source encoding")
+	}
+
+	directive := r.Header.Get("X-Amz-Metadata-Directive")
+	if directive != "" && directive != "COPY" && directive != "REPLACE" {
+		return ErrorInvalidArgument("x-amz-metadata-directive", directive, "Unknown metadata directive.")
+	}
+	if srcBucket == bucket && srcKey == object && directive != "REPLACE" && r.Header.Get("X-Amz-Storage-Class") == "" {
+		return ErrorMessage(ErrInvalidRequest, "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes.")
 	}
 	ctx := r.Context()
 	srcObj, err := g.storage.HeadObject(ctx, srcBucket, srcKey)
@@ -913,13 +924,18 @@ func (g *GoFakeS3) copyObject(bucket, object string, meta map[string]string, w h
 	// "If the current version of the object is a delete marker, Amazon S3
 	// behaves as if the object was deleted."
 
-	// merge metadata, ACL is not preserved
-	// for k, v := range srcObj.Metadata {
-	// 	if _, found := meta[k]; !found && k != "X-Amz-Acl" {
-	// 		meta[k] = v
-	// 	}
-	// }
-	delete(meta, "X-Amz-Acl")
+	// With the COPY directive, the default, the new object has the
+	// source's metadata rather than any in the request
+	if directive != "REPLACE" {
+		lastModified := meta["Last-Modified"]
+		meta = make(map[string]string, len(srcObj.Metadata))
+		for k, v := range srcObj.Metadata {
+			if isMetadataHeader(textproto.CanonicalMIMEHeaderKey(k)) {
+				meta[k] = v
+			}
+		}
+		meta["Last-Modified"] = lastModified
+	}
 
 	result, err := g.storage.CopyObject(ctx, srcBucket, srcKey, bucket, object, meta)
 	if err != nil {

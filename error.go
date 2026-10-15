@@ -56,6 +56,7 @@ const (
 	ErrEntityTooLarge ErrorCode = "EntityTooLarge"
 
 	ErrInvalidRange         ErrorCode = "InvalidRange"
+	ErrInvalidRequest       ErrorCode = "InvalidRequest"
 	ErrInvalidToken         ErrorCode = "InvalidToken"
 	ErrKeyTooLong           ErrorCode = "KeyTooLongError" // This is not a typo: Error is part of the string, but redundant in the constant name
 	ErrMalformedPOSTRequest ErrorCode = "MalformedPOSTRequest"
@@ -265,6 +266,7 @@ func (e ErrorCode) Status() int {
 		ErrInvalidDigest,
 		ErrInvalidPart,
 		ErrInvalidPartOrder,
+		ErrInvalidRequest,
 		ErrInvalidToken,
 		ErrInvalidURI,
 		ErrKeyTooLong,

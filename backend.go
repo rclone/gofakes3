@@ -232,6 +232,9 @@ type Backend interface {
 
 	DeleteMulti(ctx context.Context, bucketName string, objects ...string) (MultiDeleteResult, error)
 
+	// CopyObject copies the object at srcBucket/srcKey to dstBucket/dstKey
+	// giving it the metadata in meta, which is its complete metadata as
+	// worked out from the request's x-amz-metadata-directive.
 	CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket, dstKey string, meta map[string]string) (CopyObjectResult, error)
 }
 

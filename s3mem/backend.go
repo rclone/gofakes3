@@ -227,11 +227,6 @@ func (db *Backend) PutObject(ctx context.Context, bucketName, objectName string,
 		return result, err
 	}
 
-	err = gofakes3.MergeMetadata(ctx, db, bucketName, objectName, meta)
-	if err != nil {
-		return result, err
-	}
-
 	db.lock.Lock()
 	defer db.lock.Unlock()
 
@@ -273,12 +268,6 @@ func (db *Backend) CopyObject(ctx context.Context, srcBucket, srcKey, dstBucket,
 			err = closeErr
 		}
 	}()
-
-	for k, v := range c.Metadata {
-		if _, found := meta[k]; !found && k != "X-Amz-Acl" {
-			meta[k] = v
-		}
-	}
 
 	_, err = db.PutObject(ctx, dstBucket, dstKey, meta, c.Contents, c.Size)
 	if err != nil {

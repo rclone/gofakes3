@@ -413,59 +413,109 @@ func TestCreateObjectMetadataAndObjectTagging(t *testing.T) {
 }
 
 func TestCopyObject(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
 	ctx := context.Background()
-	svc := ts.s3Client()
 
 	srcMeta := map[string]string{
 		"Content-Type":   "text/plain",
 		"X-Amz-Meta-One": "src",
 		"X-Amz-Meta-Two": "src",
 	}
-	ts.backendPutString(defaultBucket, "src-key", srcMeta, "content")
 
-	out, err := svc.CopyObject(ctx, &s3.CopyObjectInput{
+	for _, test := range []struct {
+		directive types.MetadataDirective
+		want      map[string]string
+	}{
+		{"", map[string]string{"Content-Type": "text/plain", "X-Amz-Meta-One": "src", "X-Amz-Meta-Two": "src"}},
+		{types.MetadataDirectiveCopy, map[string]string{"Content-Type": "text/plain", "X-Amz-Meta-One": "src", "X-Amz-Meta-Two": "src"}},
+		{types.MetadataDirectiveReplace, map[string]string{"Content-Type": "application/json", "X-Amz-Meta-Two": "dst", "X-Amz-Meta-Three": "dst"}},
+	} {
+		t.Run(string(test.directive), func(t *testing.T) {
+			ts := newTestServer(t)
+			defer ts.Close()
+			svc := ts.s3Client()
+			ts.backendPutString(defaultBucket, "src-key", srcMeta, "content")
+
+			out, err := svc.CopyObject(ctx, &s3.CopyObjectInput{
+				Bucket:            aws.String(defaultBucket),
+				Key:               aws.String("dst-key"),
+				CopySource:        aws.String("/" + defaultBucket + "/src-key"),
+				MetadataDirective: test.directive,
+				ContentType:       aws.String("application/json"),
+				Metadata: map[string]string{
+					"Two":   "dst",
+					"Three": "dst",
+				},
+			})
+			ts.OK(err)
+
+			if *out.CopyObjectResult.ETag != `"9a0364b9e99bb480dd25e1f0284c8555"` { // md5("content")
+				ts.Fatal("bad etag", *out.CopyObjectResult.ETag)
+			}
+
+			obj, err := ts.backend.GetObject(mockR.Context(), defaultBucket, "dst-key", nil)
+			ts.OK(err)
+			defer func() {
+				err := obj.Contents.Close()
+				if err != nil {
+					t.Error(err)
+				}
+			}()
+			data, err := io.ReadAll(obj.Contents)
+			ts.OK(err)
+			if string(data) != "content" {
+				t.Fatal("object copying failed")
+			}
+
+			got := map[string]string{}
+			for k, v := range obj.Metadata {
+				if k != "Last-Modified" {
+					got[k] = v
+				}
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("metadata: want %v got %v", test.want, got)
+			}
+		})
+	}
+}
+
+// TestCopyObjectToItself checks copying an object to itself is only
+// allowed if it changes something.
+func TestCopyObjectToItself(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	ctx := context.Background()
+	svc := ts.s3Client()
+	ts.backendPutString(defaultBucket, "object", map[string]string{"X-Amz-Meta-One": "old"}, "content")
+
+	in := &s3.CopyObjectInput{
 		Bucket:     aws.String(defaultBucket),
-		Key:        aws.String("dst-key"),
-		CopySource: aws.String("/" + defaultBucket + "/src-key"),
-		Metadata: map[string]string{
-			"Two":   "dst",
-			"Three": "dst",
-		},
+		Key:        aws.String("object"),
+		CopySource: aws.String("/" + defaultBucket + "/object"),
+		Metadata:   map[string]string{"One": "new"},
+	}
+	_, err := svc.CopyObject(ctx, in)
+	if !s3HasErrorCode(err, gofakes3.ErrInvalidRequest) {
+		t.Fatal("expected InvalidRequest, got", err)
+	}
+
+	in.MetadataDirective = types.MetadataDirectiveReplace
+	_, err = svc.CopyObject(ctx, in)
+	ts.OK(err)
+	head, err := svc.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(defaultBucket),
+		Key:    aws.String("object"),
 	})
 	ts.OK(err)
-
-	if *out.CopyObjectResult.ETag != `"9a0364b9e99bb480dd25e1f0284c8555"` { // md5("content")
-		ts.Fatal("bad etag", *out.CopyObjectResult.ETag)
+	if head.Metadata["one"] != "new" {
+		t.Fatal("metadata not replaced:", head.Metadata)
 	}
+	ts.assertObject(defaultBucket, "object", nil, "content")
 
-	obj, err := ts.backend.GetObject(mockR.Context(), defaultBucket, "dst-key", nil)
-	ts.OK(err)
-
-	defer func() {
-		err := obj.Contents.Close()
-		if err != nil {
-			t.Error(err)
-		}
-	}()
-	data, err := io.ReadAll(obj.Contents)
-	ts.OK(err)
-
-	if string(data) != "content" {
-		t.Fatal("object copying failed")
-	}
-
-	if v := obj.Metadata["X-Amz-Meta-One"]; v != "src" {
-		t.Fatalf("bad Content-Type: %q", v)
-	}
-
-	if v := obj.Metadata["X-Amz-Meta-Two"]; v != "dst" {
-		t.Fatalf("bad Content-Encoding: %q", v)
-	}
-
-	if v := obj.Metadata["X-Amz-Meta-Three"]; v != "dst" {
-		t.Fatalf("bad Content-Encoding: %q", v)
+	in.MetadataDirective = "BOGUS"
+	_, err = svc.CopyObject(ctx, in)
+	if !s3HasErrorCode(err, gofakes3.ErrInvalidArgument) {
+		t.Fatal("expected InvalidArgument, got", err)
 	}
 }
 
