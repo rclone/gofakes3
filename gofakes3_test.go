@@ -692,6 +692,43 @@ func TestGetObjectRange(t *testing.T) {
 	}
 }
 
+func TestGetObjectRangeStatus(t *testing.T) {
+	in := randomFileBody(1024)
+
+	for idx, tc := range []struct {
+		hdr          string
+		status       int
+		contentRange string
+	}{
+		{"", http.StatusOK, ""},
+		{"bytes=0-1", http.StatusPartialContent, "bytes 0-1/1024"},
+		{"bytes=512-", http.StatusPartialContent, "bytes 512-1023/1024"},
+		{"bytes=-1", http.StatusPartialContent, "bytes 1023-1023/1024"},
+	} {
+		t.Run(fmt.Sprintf("%d/%s", idx, tc.hdr), func(t *testing.T) {
+			ts := newTestServer(t)
+			defer ts.Close()
+			ts.backendPutBytes(defaultBucket, "foo", nil, in)
+
+			client := ts.rawClient()
+			rq := client.Request("GET", fmt.Sprintf("/%s/foo", defaultBucket), nil)
+			if tc.hdr != "" {
+				rq.Header.Set("Range", tc.hdr)
+			}
+			rs, err := client.Do(rq)
+			ts.OK(err)
+			defer rs.Body.Close()
+
+			if rs.StatusCode != tc.status {
+				t.Fatal("status", rs.StatusCode, "!=", tc.status)
+			}
+			if cr := rs.Header.Get("Content-Range"); cr != tc.contentRange {
+				t.Fatal("content-range", cr, "!=", tc.contentRange)
+			}
+		})
+	}
+}
+
 func TestGetObjectRangeInvalid(t *testing.T) {
 	ctx := context.Background()
 	assertRangeInvalid := func(ts *testServer, key string, hdr string) {
