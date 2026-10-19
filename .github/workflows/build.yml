@@ -111,18 +111,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Code quality test
-        uses: golangci/golangci-lint-action@v4
-        with:
-          # Optional: version of golangci-lint to use in form of v1.2 or v1.2.3 or `latest` to use the latest version
-          version: latest
-
-      # Run govulncheck on the latest go version, the one we build binaries with
+      # Lint and run govulncheck on the latest go version, the one we build binaries with
       - name: Install Go
         uses: actions/setup-go@v5
         with:
           go-version: '>=1.27.0'
           check-latest: true
+
+      - name: Code quality test
+        uses: golangci/golangci-lint-action@v9
+        with:
+          # Optional: version of golangci-lint to use in form of v1.2 or v1.2.3 or `latest` to use the latest version
+          version: latest
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
