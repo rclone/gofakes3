@@ -15,6 +15,7 @@ func (o *ObjectRange) writeHeader(sz int64, w http.ResponseWriter) {
 	if o != nil {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", o.Start, o.Start+o.Length-1, sz))
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", o.Length))
+		w.WriteHeader(http.StatusPartialContent)
 	} else {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", sz))
 	}
