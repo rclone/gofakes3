@@ -3,6 +3,7 @@ package gofakes3
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -554,6 +555,11 @@ func (g *GoFakeS3) createBucket(bucket string, w http.ResponseWriter, r *http.Re
 	}
 	if strings.EqualFold(r.Header.Get("X-Amz-Bucket-Object-Lock-Enabled"), "true") {
 		return ErrorMessage(ErrNotImplemented, "Object lock is not supported.")
+	}
+	// The CreateBucketConfiguration in the body isn't used, but is
+	// checked against its digest as S3 does
+	if _, err := g.readBody(r, true); err != nil {
+		return err
 	}
 	if err := g.storage.CreateBucket(r.Context(), bucket); err != nil {
 		return err
@@ -1185,7 +1191,7 @@ func (g *GoFakeS3) deleteMulti(bucket string, w http.ResponseWriter, r *http.Req
 	}
 
 	var in DeleteRequest
-	if err := g.xmlDecodeBody(r.Body, &in); err != nil {
+	if err := g.xmlDecodeBody(r, &in, true); err != nil {
 		return err
 	}
 	if len(in.Objects) > MaxDeleteObjects {
@@ -1509,8 +1515,10 @@ func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID Uploa
 		return err
 	}
 
+	// The x-amz-checksum-<algorithm> header has the checksum of the
+	// object, not of the request body
 	var in CompleteMultipartUploadRequest
-	if err := g.xmlDecodeBody(r.Body, &in); err != nil {
+	if err := g.xmlDecodeBody(r, &in, false); err != nil {
 		return err
 	}
 
@@ -1642,7 +1650,7 @@ func (g *GoFakeS3) putBucketVersioning(bucket string, w http.ResponseWriter, r *
 	}
 
 	var in VersioningConfiguration
-	if err := g.xmlDecodeBody(r.Body, &in); err != nil {
+	if err := g.xmlDecodeBody(r, &in, true); err != nil {
 		return err
 	}
 
@@ -1688,22 +1696,58 @@ func (g *GoFakeS3) xmlEncoder(w http.ResponseWriter) *xml.Encoder {
 	return xe
 }
 
-// xmlDecodeBody decodes the XML request body in rdr into into, failing
-// with ErrMaxMessageLengthExceeded if it is bigger than MaxXMLBodySize.
-func (g *GoFakeS3) xmlDecodeBody(rdr io.ReadCloser, into interface{}) (err error) {
-	body, err := io.ReadAll(io.LimitReader(rdr, MaxXMLBodySize+1))
-	defer CheckClose(rdr, &err)
+// readBody reads the body of r, which isn't object data, failing with
+// ErrMaxMessageLengthExceeded if it is bigger than MaxXMLBodySize.
+//
+// The body is checked against the Content-MD5 header and, if checksums
+// is set, the x-amz-checksum-<algorithm> header, failing with
+// ErrBadDigest if it doesn't match either.
+func (g *GoFakeS3) readBody(r *http.Request, checksums bool) (body []byte, err error) {
+	defer CheckClose(r.Body, &err)
+	body, err = io.ReadAll(io.LimitReader(r.Body, MaxXMLBodySize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > MaxXMLBodySize {
+		return nil, ErrMaxMessageLengthExceeded
+	}
+
+	if _, ok := r.Header[textproto.CanonicalMIMEHeaderKey("Content-MD5")]; ok && g.integrityCheck {
+		expected, err := base64.StdEncoding.DecodeString(r.Header.Get("Content-MD5"))
+		if err != nil || len(expected) != md5.Size {
+			return nil, ErrInvalidDigest
+		}
+		if sum := md5.Sum(body); !bytes.Equal(sum[:], expected) {
+			return nil, ErrorMessage(ErrBadDigest, "The Content-MD5 you specified did not match what we received.")
+		}
+	}
+
+	if checksums {
+		algorithm, expected, err := requestChecksum(r.Header)
+		if err != nil {
+			return nil, err
+		}
+		if algorithm != "" {
+			h := checksumAlgorithms[algorithm]()
+			_, _ = h.Write(body)
+			if !bytes.Equal(h.Sum(nil), expected) {
+				return nil, ErrorMessagef(ErrBadDigest, "The %s you specified did not match the calculated checksum.", strings.ToUpper(algorithm))
+			}
+		}
+	}
+	return body, nil
+}
+
+// xmlDecodeBody decodes the XML body of r into into, after checking it
+// as readBody does.
+func (g *GoFakeS3) xmlDecodeBody(r *http.Request, into interface{}, checksums bool) error {
+	body, err := g.readBody(r, checksums)
 	if err != nil {
 		return err
 	}
-	if len(body) > MaxXMLBodySize {
-		return ErrMaxMessageLengthExceeded
-	}
-
 	if err := xml.Unmarshal(body, into); err != nil {
 		return ErrorMessage(ErrMalformedXML, err.Error())
 	}
-
 	return nil
 }
 

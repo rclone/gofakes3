@@ -138,7 +138,7 @@ func (g *GoFakeS3) routeObjectTagging(bucket, object string, w http.ResponseWrit
 		tagging := ""
 		if r.Method == "PUT" {
 			var in Tagging
-			if err := g.xmlDecodeBody(r.Body, &in); err != nil {
+			if err := g.xmlDecodeBody(r, &in, true); err != nil {
 				return err
 			}
 			tagging, err = encodeTags(in.TagSet)

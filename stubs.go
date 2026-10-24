@@ -79,7 +79,7 @@ func (g *GoFakeS3) putACL(r *http.Request) error {
 		}
 	}
 	var acl AccessControlPolicy
-	if err := g.xmlDecodeBody(r.Body, &acl); err != nil {
+	if err := g.xmlDecodeBody(r, &acl, true); err != nil {
 		return err
 	}
 	if len(acl.Grants) != 1 ||
