@@ -22,6 +22,8 @@ const (
 	// way no more specific error describes.
 	ErrBadRequest ErrorCode = "BadRequest"
 
+	ErrConditionalRequestConflict ErrorCode = "ConditionalRequestConflict"
+
 	ErrBucketAlreadyExists ErrorCode = "BucketAlreadyExists"
 
 	// Raised when attempting to delete a bucket that still contains items.
@@ -265,7 +267,7 @@ func (e ErrorCode) Message() string {
 
 func (e ErrorCode) Status() int {
 	switch e {
-	case ErrBucketAlreadyExists,
+	case ErrConditionalRequestConflict, ErrBucketAlreadyExists,
 		ErrBucketNotEmpty,
 		ErrInvalidBucketState:
 		return http.StatusConflict

@@ -160,7 +160,10 @@ func HasWriteConditions(ctx context.Context) bool {
 //
 // If there are conditions it returns r with them in its context for
 // the backend to check with CheckWriteConditions.
-func (g *GoFakeS3) checkWriteConditions(r *http.Request, bucket, object string) (*http.Request, error) {
+func (g *GoFakeS3) checkWriteConditions(r *http.Request, bucket, object string, backend any) (*http.Request, error) {
+	if b, ok := backend.(ConditionalWriteBackend); ok {
+		return conditionalWriteRequest(r, b)
+	}
 	c := writeConditions{
 		ifMatch:     r.Header.Get("If-Match"),
 		ifNoneMatch: r.Header.Get("If-None-Match"),

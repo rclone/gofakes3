@@ -894,13 +894,13 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 		return err
 	}
 
-	if r.Header.Get("X-Amz-Copy-Source") != "" {
-		return g.copyObject(bucket, object, meta, w, r)
-	}
-
-	r, err = g.checkWriteConditions(r, bucket, object)
+	r, err = g.checkWriteConditions(r, bucket, object, g.storage)
 	if err != nil {
 		return err
+	}
+
+	if r.Header.Get("X-Amz-Copy-Source") != "" {
+		return g.copyObject(bucket, object, meta, w, r)
 	}
 
 	// The size is unknown (-1) if the body is sent with chunked transfer
@@ -1522,7 +1522,11 @@ func (g *GoFakeS3) completeMultipartUpload(bucket, object string, uploadID Uploa
 		return err
 	}
 
-	r, err = g.checkWriteConditions(r, bucket, object)
+	var backend any = g.storage
+	if upload.streaming {
+		backend = g.multipart
+	}
+	r, err = g.checkWriteConditions(r, bucket, object, backend)
 	if err != nil {
 		return err
 	}
