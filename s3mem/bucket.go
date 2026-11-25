@@ -263,8 +263,15 @@ func (b *bucket) rmVersion(name string, versionID gofakes3.VersionID, at time.Ti
 		result.IsDeleteMarker = version.deleteMarker
 	}
 
-	if object.data == nil && (object.versions == nil || object.versions.Len() == 0) {
-		b.objects.Delete(name)
+	if object.data == nil {
+		if object.versions == nil || object.versions.Len() == 0 {
+			b.objects.Delete(name)
+		} else {
+			latest := object.versions.SeekToLast()
+			object.data = latest.Value().(*bucketData)
+			latest.Close()
+			object.versions.Delete(object.data.versionID)
+		}
 	}
 
 	return result, nil

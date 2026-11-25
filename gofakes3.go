@@ -43,6 +43,8 @@ type GoFakeS3 struct {
 	integrityCheck          bool
 	failOnUnimplementedPage bool
 	hostBucket              bool
+	hostBucketBases         []string
+	insecureCORS            bool
 	autoBucket              bool
 	uploader                *uploader
 	uploadOwner             func(ctx context.Context) string // nil if uploads aren't private
@@ -105,7 +107,7 @@ func (g *GoFakeS3) Server() http.Handler {
 		handler = g.timeSkewMiddleware(handler)
 	}
 
-	if g.hostBucket {
+	if g.hostBucket || len(g.hostBucketBases) != 0 {
 		handler = g.hostBucketMiddleware(handler)
 	}
 
@@ -206,6 +208,20 @@ func (g *GoFakeS3) hostBucketMiddleware(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, rq *http.Request) {
 		parts := strings.SplitN(rq.Host, ".", 2)
 		bucket := parts[0]
+		if len(g.hostBucketBases) != 0 && !g.hostBucket {
+			host, _, _ := strings.Cut(rq.Host, ":")
+			bucket = ""
+			for _, base := range g.hostBucketBases {
+				if candidate, ok := strings.CutSuffix(host, "."+base); ok && !strings.Contains(candidate, ".") {
+					bucket = candidate
+					break
+				}
+			}
+			if bucket == "" {
+				handler.ServeHTTP(w, rq)
+				return
+			}
+		}
 
 		p := rq.URL.Path
 		rq.URL.Path = "/" + bucket
@@ -573,15 +589,23 @@ func (g *GoFakeS3) createBucket(bucket string, w http.ResponseWriter, r *http.Re
 	return nil
 }
 
-// DeleteBucket deletes the bucket in the underlying backend, if and only if it
-// contains no items.
+// deleteBucket deletes an empty bucket, or allows an explicit force-delete
+// request if the backend supports it.
 func (g *GoFakeS3) deleteBucket(bucket string, w http.ResponseWriter, r *http.Request) error {
 	g.log.Print(LogInfo, "DELETE BUCKET:", bucket)
 
 	if err := g.ensureBucketExists(r, bucket); err != nil {
 		return err
 	}
-	if err := g.storage.DeleteBucket(r.Context(), bucket); err != nil {
+	deleteBucket := g.storage.DeleteBucket
+	if r.Header.Get("X-Minio-Force-Delete") == "true" {
+		if backend, ok := g.storage.(interface {
+			ForceDeleteBucket(context.Context, string) error
+		}); ok {
+			deleteBucket = backend.ForceDeleteBucket
+		}
+	}
+	if err := deleteBucket(r.Context(), bucket); err != nil {
 		return err
 	}
 
@@ -798,7 +822,15 @@ func (g *GoFakeS3) headObject(
 		w.WriteHeader(http.StatusPartialContent)
 		return nil
 	}
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", obj.Size))
+	rangeRequest, err := parseRangeHeader(r.Header.Get("Range"))
+	if err != nil {
+		return err
+	}
+	objectRange, err := rangeRequest.Range(obj.Size)
+	if err != nil {
+		return err
+	}
+	objectRange.writeHeader(obj.Size, w)
 
 	return nil
 }
@@ -929,26 +961,25 @@ func (g *GoFakeS3) createObject(bucket, object string, w http.ResponseWriter, r 
 		}
 	}
 
-	var reader io.Reader
-
-	if isChunkedStreamingPayload(r.Header.Get("X-Amz-Content-Sha256")) {
-		reader = newChunkedReader(r.Body)
-	} else {
-		reader = r.Body
-	}
+	var reader io.Reader = r.Body
+	chunked := isStreamingPayload(r.Header.Get("X-Amz-Content-Sha256"))
 
 	// This header is set e.g. when the body contains trailing headers
 	// It is used to extract real object length
-	if decodedLength := r.Header.Get("X-Amz-Decoded-Content-Length"); decodedLength != "" {
+	if decodedLength := r.Header.Get("X-Amz-Decoded-Content-Length"); decodedLength != "" || chunked {
 		size, err = strconv.ParseInt(decodedLength, 10, 64)
-		if err != nil {
+		if err != nil || size < 0 {
 			w.WriteHeader(http.StatusBadRequest) // XXX: no code for this, according to s3tests
 			return nil
 		}
 	}
 
-	// Ensure reader only contains object (strips the trailing headers)
-	if size >= 0 {
+	// The aws-chunked reader consumes and validates trailers at EOF.
+	if chunked {
+		chunks := newChunkedReader(r.Body).verifyTrailer(r.Header.Get("X-Amz-Trailer"))
+		chunks.remaining = size
+		reader = chunks
+	} else if size >= 0 {
 		reader = io.LimitReader(reader, size)
 	}
 
@@ -1035,6 +1066,9 @@ func (g *GoFakeS3) copyObject(bucket, object string, meta map[string]string, w h
 	if err != nil {
 		return err
 	}
+	if srcObj.Contents != nil {
+		defer func() { _ = srcObj.Contents.Close() }()
+	}
 	srcETag := `"` + hex.EncodeToString(srcObj.Hash) + `"`
 	if err := checkConditions(r.Header, copySourceConditions, srcETag, objectLastModified(srcObj), ErrPreconditionFailed); err != nil {
 		return err
@@ -1077,7 +1111,11 @@ func (g *GoFakeS3) copyObject(bucket, object string, meta map[string]string, w h
 		meta[TaggingMetadataKey] = tagging
 	}
 
-	result, err := g.storage.CopyObject(ctx, srcBucket, srcKey, bucket, object, meta)
+	r, err = g.checkWriteConditions(r, bucket, object)
+	if err != nil {
+		return err
+	}
+	result, err := g.storage.CopyObject(r.Context(), srcBucket, srcKey, bucket, object, meta)
 	if err != nil {
 		return err
 	}
@@ -1098,13 +1136,21 @@ func (g *GoFakeS3) copyObject(bucket, object string, meta map[string]string, w h
 // from its x-amz-copy-source header.
 func parseCopySource(source string) (bucket, key string, err error) {
 	// XXX No support for versionId subresource
-	parts := strings.SplitN(strings.TrimPrefix(source, "/"), "/", 2)
+	path, _, _ := strings.Cut(source, "?")
+	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
 	if len(parts) != 2 {
-		return "", "", ErrorInvalidArgument("x-amz-copy-source", source, "Copy Source must mention the source bucket and key: sourcebucket/sourcekey")
+		decoded, err := url.QueryUnescape(path)
+		if err != nil {
+			return "", "", ErrorInvalidArgument("x-amz-copy-source", source, "Invalid copy source encoding")
+		}
+		bucket, key, ok := strings.Cut(strings.TrimPrefix(decoded, "/"), "/")
+		if !ok {
+			return "", "", ErrorInvalidArgument("x-amz-copy-source", source, "Copy Source must mention the source bucket and key: sourcebucket/sourcekey")
+		}
+		return bucket, key, nil
 	}
 	bucket = parts[0]
-	key = strings.SplitN(parts[1], "?", 2)[0]
-	key, err = url.QueryUnescape(key)
+	key, err = url.QueryUnescape(parts[1])
 	if err != nil {
 		return "", "", ErrorInvalidArgument("x-amz-copy-source", source, "Invalid copy source encoding")
 	}
@@ -1128,7 +1174,7 @@ func (g *GoFakeS3) deleteObject(bucket, object string, w http.ResponseWriter, r 
 		}
 		c.size = &size
 	}
-	if err := g.checkDeleteConditions(r.Context(), bucket, object, c); err != nil {
+	if err := g.checkDeleteConditions(r.Context(), bucket, object, "", c); err != nil {
 		return err
 	}
 
@@ -1200,26 +1246,38 @@ func (g *GoFakeS3) deleteMulti(bucket string, w http.ResponseWriter, r *http.Req
 
 	// Objects whose conditions aren't met aren't deleted
 	keys := make([]string, 0, len(in.Objects))
-	var refused []ErrorResult
+	var out MultiDeleteResult
 	for _, o := range in.Objects {
 		c := deleteConditions{etag: o.ETag, lastModified: o.LastModifiedTime, size: o.Size}
-		if err := g.checkDeleteConditions(r.Context(), bucket, o.Key, c); err != nil {
+		version := VersionID(o.VersionID)
+		err := g.checkDeleteConditions(r.Context(), bucket, o.Key, version, c)
+		switch {
+		case err != nil:
+		case version == "" || (version == "null" && g.versioned == nil):
+			keys = append(keys, o.Key)
+		case g.versioned == nil:
+			err = ErrNotImplemented
+		default:
+			_, err = g.versioned.DeleteObjectVersion(bucket, o.Key, version)
+			if err == nil {
+				out.Deleted = append(out.Deleted, ObjectID{Key: o.Key, VersionID: o.VersionID})
+			}
+		}
+		if err != nil {
 			result := ErrorResultFromError(err)
 			result.Key = o.Key
-			refused = append(refused, result)
-			continue
+			out.Error = append(out.Error, result)
 		}
-		keys = append(keys, o.Key)
 	}
 
-	var out MultiDeleteResult
 	if len(keys) > 0 {
-		out, err = g.storage.DeleteMulti(r.Context(), bucket, keys...)
+		current, err := g.storage.DeleteMulti(r.Context(), bucket, keys...)
 		if err != nil {
 			return err
 		}
+		out.Deleted = append(out.Deleted, current.Deleted...)
+		out.Error = append(out.Error, current.Error...)
 	}
-	out.Error = append(out.Error, refused...)
 
 	if in.Quiet {
 		out.Deleted = nil
@@ -1305,41 +1363,37 @@ func (g *GoFakeS3) putMultipartUploadPart(bucket, object string, uploadID Upload
 		return g.uploadPartCopy(upload, int(partNumber), w, r)
 	}
 
-	size, err := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
-	if err != nil {
-		return ErrMissingContentLength
-	}
-
 	// The error from closing the request body is discarded - from go1.27
 	// Close returns io.EOF if the body was not read to EOF (eg when the
 	// body contains unread trailing headers), and a close error tells us
 	// nothing useful anyway as real I/O problems surface from Read.
 	defer func() { _ = r.Body.Close() }()
 
-	var rdr io.Reader
-	if isChunkedStreamingPayload(r.Header.Get("X-Amz-Content-Sha256")) {
-		rdr = newChunkedReader(r.Body)
-		size, err = strconv.ParseInt(r.Header.Get("X-Amz-Decoded-Content-Length"), 10, 64)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest) // XXX: no code for this, according to s3tests
+	var rdr io.Reader = r.Body
+	chunked := isStreamingPayload(r.Header.Get("X-Amz-Content-Sha256"))
+	length := r.Header.Get("Content-Length")
+
+	decodedLength := r.Header.Get("X-Amz-Decoded-Content-Length")
+	if decodedLength != "" || chunked {
+		length = decodedLength
+	}
+	size, err := strconv.ParseInt(length, 10, 64)
+	if err != nil || size < 0 {
+		if chunked || decodedLength != "" {
+			w.WriteHeader(http.StatusBadRequest) // No S3 error code for an invalid decoded length.
 			return nil
 		}
+		return ErrMissingContentLength
+	}
+
+	// The aws-chunked reader consumes and validates trailers at EOF.
+	if chunked {
+		chunks := newChunkedReader(r.Body).verifyTrailer(r.Header.Get("X-Amz-Trailer"))
+		chunks.remaining = size
+		rdr = chunks
 	} else {
-		rdr = r.Body
+		rdr = io.LimitReader(rdr, size)
 	}
-
-	// This header is set e.g. when the body contains trailing headers
-	// It is used to extract real object length
-	if decodedLength := r.Header.Get("X-Amz-Decoded-Content-Length"); decodedLength != "" {
-		size, err = strconv.ParseInt(decodedLength, 10, 64)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest) // XXX: no code for this, according to s3tests
-			return nil
-		}
-	}
-
-	// Ensure reader only contains object (strips the trailing headers)
-	rdr = io.LimitReader(rdr, size)
 
 	if g.integrityCheck {
 		md5Base64 := r.Header.Get("Content-MD5")
@@ -1450,12 +1504,6 @@ func (g *GoFakeS3) uploadPartCopy(upload *multipartUpload, partNumber int, w htt
 		ETag:         etag,
 		LastModified: NewContentTime(g.timeSource.Now()),
 	})
-}
-
-// isChunkedStreamingPayload reports whether x-amz-content-sha256 denotes aws-chunked transfer encoding.
-func isChunkedStreamingPayload(value string) bool {
-	return value == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" ||
-		value == "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
 }
 
 func (g *GoFakeS3) abortMultipartUpload(bucket, object string, uploadID UploadID, w http.ResponseWriter, r *http.Request) error {
