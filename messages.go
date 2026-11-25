@@ -1,11 +1,12 @@
 package gofakes3
 
 import (
-	"encoding/xml"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+
+	xml "github.com/minio/xxml"
 )
 
 type Storage struct {
@@ -13,6 +14,13 @@ type Storage struct {
 	Xmlns   string    `xml:"xmlns,attr"`
 	Owner   *UserInfo `xml:"Owner,omitempty"`
 	Buckets Buckets   `xml:"Buckets>Bucket"`
+
+	// ContinuationToken is set if there are more buckets to list
+	// after these, and is passed to get them.
+	ContinuationToken string `xml:"ContinuationToken,omitempty"`
+
+	// Prefix is the prefix the bucket names were limited to, if any.
+	Prefix string `xml:"Prefix,omitempty"`
 }
 
 type UserInfo struct {
@@ -169,11 +177,14 @@ func (er ErrorResult) String() string {
 	return fmt.Sprintf("%s: [%s] %s", er.Key, er.Code, er.Message)
 }
 
-type InitiateMultipartUploadResult struct {
+type InitiateMultipartUpload struct {
 	Bucket   string   `xml:"Bucket"`
 	Key      string   `xml:"Key"`
 	UploadID UploadID `xml:"UploadId"`
 }
+
+// InitiateMultipartUploadResult is the XML response to initiating an upload.
+type InitiateMultipartUploadResult = InitiateMultipartUpload
 
 type ListBucketResultBase struct {
 	XMLName xml.Name `xml:"ListBucketResult"`
@@ -203,6 +214,8 @@ type ListBucketResultBase struct {
 
 	CommonPrefixes []CommonPrefix `xml:"CommonPrefixes,omitempty"`
 	Contents       []*Content     `xml:"Contents"`
+
+	EncodingType string `xml:"EncodingType,omitempty"`
 }
 
 type GetBucketLocation struct {
@@ -234,8 +247,8 @@ type ListBucketResultV2 struct {
 	ListBucketResultBase
 
 	// If ContinuationToken was sent with the request, it is included in the
-	// response.
-	ContinuationToken string `xml:"ContinuationToken,omitempty"`
+	// response, even if it is empty.
+	ContinuationToken *string `xml:"ContinuationToken,omitempty"`
 
 	// Returns the number of keys included in the response. The value is always
 	// less than or equal to the MaxKeys value.
@@ -437,6 +450,13 @@ type CopyObjectResult struct {
 	LastModified ContentTime `xml:"LastModified,omitempty"`
 }
 
+// CopyPartResult is the result of an UploadPartCopy.
+type CopyPartResult struct {
+	XMLName      xml.Name    `xml:"CopyPartResult"`
+	ETag         string      `xml:"ETag"`
+	LastModified ContentTime `xml:"LastModified"`
+}
+
 // MFADeleteStatus is used by VersioningConfiguration.
 type MFADeleteStatus string
 
@@ -468,8 +488,13 @@ const (
 type ObjectID struct {
 	Key string `xml:"Key"`
 
-	// Versions not supported in GoFakeS3 yet.
+	// VersionID selects a specific object version when deleting.
 	VersionID string `xml:"VersionId,omitempty" json:"VersionId,omitempty"`
+
+	// Conditions on deleting the object in a DeleteRequest.
+	ETag             string `xml:"ETag,omitempty" json:"ETag,omitempty"`
+	LastModifiedTime string `xml:"LastModifiedTime,omitempty" json:"LastModifiedTime,omitempty"`
+	Size             *int64 `xml:"Size,omitempty" json:"Size,omitempty"`
 }
 
 type StorageClass string
@@ -494,12 +519,12 @@ type VersionID string
 type VersioningConfiguration struct {
 	XMLName xml.Name `xml:"VersioningConfiguration"`
 
-	Status VersioningStatus `xml:"Status"`
+	Status VersioningStatus `xml:"Status,omitempty"`
 
 	// When enabled, the bucket owner must include the x-amz-mfa request header
 	// in requests to change the versioning state of a bucket and to
 	// permanently delete a versioned object.
-	MFADelete MFADeleteStatus `xml:"MfaDelete"`
+	MFADelete MFADeleteStatus `xml:"MfaDelete,omitempty"`
 }
 
 func (v *VersioningConfiguration) Enabled() bool {

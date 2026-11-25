@@ -1,9 +1,8 @@
 package gofakes3
 
 import (
-	"encoding/base64"
-	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -19,8 +18,10 @@ import (
 // verbs, but outside the core functionality, the clean separation starts
 // to degrade, especially around multipart uploads.
 func (g *GoFakeS3) routeBase(w http.ResponseWriter, r *http.Request) {
+	// Bucket names can't contain "/", so any leading "/" are removed,
+	// but the rest are kept as an object key may start or end with "/"
 	var (
-		path   = strings.TrimPrefix(r.URL.Path, "/")
+		path   = strings.TrimLeft(r.URL.Path, "/")
 		parts  = strings.SplitN(path, "/", 2)
 		bucket = parts[0]
 		query  = r.URL.Query()
@@ -28,18 +29,21 @@ func (g *GoFakeS3) routeBase(w http.ResponseWriter, r *http.Request) {
 		err    error
 	)
 
-	hdr := w.Header()
-
-	id := fmt.Sprintf("%016X", g.nextRequestID())
-	hdr.Set("x-amz-id-2", base64.StdEncoding.EncodeToString([]byte(id+id+id+id))) // x-amz-id-2 is 48 bytes of random stuff
-	hdr.Set("x-amz-request-id", id)
-	hdr.Set("Server", "AmazonS3")
-
 	if len(parts) == 2 {
 		object = parts[1]
 	}
 
-	if uploadID := UploadID(query.Get("uploadId")); uploadID != "" {
+	if _, ok := query["tagging"]; ok && object != "" {
+		err = g.routeObjectTagging(bucket, object, w, r)
+
+	} else if sub := unsupportedSubresource(query); sub != "" {
+		err = g.routeUnsupported(bucket, object, sub, w, r)
+
+	} else if sub := misusedSubresource(query, object != "", r.Method); bucket != "" && sub != "" {
+		g.log.Print(LogInfo, "sub-resource", sub, "used with", r.Method, r.URL.Path)
+		err = ErrMethodNotAllowed
+
+	} else if uploadID := UploadID(query.Get("uploadId")); uploadID != "" {
 		err = g.routeMultipartUpload(bucket, object, uploadID, w, r)
 
 	} else if _, ok := query["uploads"]; ok {
@@ -53,11 +57,6 @@ func (g *GoFakeS3) routeBase(w http.ResponseWriter, r *http.Request) {
 
 	} else if versionID := versionFromQuery(query["versionId"]); versionID != "" {
 		err = g.routeVersion(bucket, object, VersionID(versionID), w, r)
-
-	} else if _, ok := query["acl"]; ok {
-		// ACLs are not enforced; accept the request as a no-op
-		w.WriteHeader(http.StatusOK)
-		return
 
 	} else if bucket != "" && object != "" {
 		err = g.routeObject(bucket, object, w, r)
@@ -83,6 +82,9 @@ func (g *GoFakeS3) routeBase(w http.ResponseWriter, r *http.Request) {
 func (g *GoFakeS3) routeObject(bucket, object string, w http.ResponseWriter, r *http.Request) (err error) {
 	switch r.Method {
 	case "GET":
+		if _, ok := r.URL.Query()["attributes"]; ok {
+			return g.getObjectAttributes(bucket, object, w, r)
+		}
 		return g.getObject(bucket, object, "", w, r)
 	case "HEAD":
 		return g.headObject(bucket, object, "", w, r)
@@ -190,6 +192,100 @@ func (g *GoFakeS3) routeMultipartUpload(bucket, object string, uploadID UploadID
 	default:
 		return ErrMethodNotAllowed
 	}
+}
+
+// unsupportedSubresources are the S3 sub-resources (query parameters
+// selecting an operation other than the plain object or bucket one)
+// which GoFakeS3 doesn't implement.
+var unsupportedSubresources = []string{
+	"accelerate",
+	"acl",
+	"analytics",
+	"cors",
+	"encryption",
+	"intelligent-tiering",
+	"inventory",
+	"legal-hold",
+	"lifecycle",
+	"logging",
+	"metadataTable",
+	"metrics",
+	"notification",
+	"object-lock",
+	"ownershipControls",
+	"policy",
+	"policyStatus",
+	"publicAccessBlock",
+	"replication",
+	"requestPayment",
+	"restore",
+	"retention",
+	"select",
+	"tagging",
+	"torrent",
+	"website",
+}
+
+// unsupportedSubresource returns the first unsupported sub-resource
+// named in query, or "" if there is none.
+func unsupportedSubresource(query url.Values) string {
+	for _, sub := range unsupportedSubresources {
+		if _, ok := query[sub]; ok {
+			return sub
+		}
+	}
+	return ""
+}
+
+// subresourceMethods are the methods the sub-resources which are
+// implemented by the object and bucket routes are implemented for, on
+// objects and on buckets.
+var subresourceMethods = map[string]struct{ object, bucket string }{
+	"attributes": {object: "GET"},
+	"delete":     {bucket: "POST"},
+	"location":   {bucket: "GET"},
+}
+
+// misusedSubresource returns the first sub-resource named in query
+// which isn't implemented for method on an object, if isObject, or on
+// a bucket, or "" if there is none.
+//
+// These requests must not be handled as plain object or bucket
+// requests either, as that would, for example, delete the bucket for a
+// DELETE ?location.
+func misusedSubresource(query url.Values, isObject bool, method string) string {
+	for sub, methods := range subresourceMethods {
+		if _, ok := query[sub]; !ok {
+			continue
+		}
+		allowed := methods.bucket
+		if isObject {
+			allowed = methods.object
+		}
+		// HEAD is answered as the plain object or bucket request
+		if method != allowed && !(method == "HEAD" && allowed == "GET") {
+			return sub
+		}
+	}
+	return ""
+}
+
+// routeUnsupported handles a request for an unsupported sub-resource,
+// answering as S3 does when that feature isn't configured if it can,
+// and refusing it otherwise.
+//
+// These must not be handled as plain object or bucket requests, as
+// that would, for example, overwrite an object with the body of a PUT
+// ?acl or delete a bucket for a DELETE ?policy.
+func (g *GoFakeS3) routeUnsupported(bucket, object, sub string, w http.ResponseWriter, r *http.Request) error {
+	g.log.Print(LogInfo, "unsupported sub-resource", sub, r.Method, r.URL.Path)
+	if bucket == "" {
+		return ErrNotImplemented
+	}
+	if err := g.ensureBucketExists(r, bucket); err != nil {
+		return err
+	}
+	return g.routeUnsupportedStub(bucket, object, sub, w, r)
 }
 
 func versionFromQuery(qv []string) string {

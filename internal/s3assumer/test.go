@@ -6,7 +6,7 @@ import (
 
 func testName(test Test) string {
 	v := reflect.ValueOf(test)
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 	return v.Type().Name()

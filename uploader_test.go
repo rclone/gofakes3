@@ -1,10 +1,13 @@
 package gofakes3_test
 
 import (
-	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"context"
 	"testing"
 
-	"github.com/johannesboyne/gofakes3"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/rclone/gofakes3"
 )
 
 func TestMultipartUpload(t *testing.T) {
@@ -139,34 +142,149 @@ func TestListMultipartUploadsPrefix(t *testing.T) {
 }
 
 func TestListMultipartUploadParts(t *testing.T) {
-	doUpload := func(ts *testServer) {
-		id := ts.createMultipartUpload(defaultBucket, "foo", nil)
+	ts := newTestServer(t)
+	defer ts.Close()
 
-		parts := []s3types.CompletedPart{
-			ts.uploadPart(defaultBucket, "foo", id, 1, []byte("abc")),
-			ts.uploadPart(defaultBucket, "foo", id, 2, []byte("def")),
-			ts.uploadPart(defaultBucket, "foo", id, 3, []byte("ghi")),
-		}
+	id := ts.createMultipartUpload(defaultBucket, "foo", nil)
 
-		ts.assertListUploadParts(defaultBucket, "foo", id,
-			listUploadPartsOpts{}.withCompletedParts(parts...))
-
-		ts.assertCompleteUpload(defaultBucket, "foo", id, parts, []byte("abcdefghi"))
-
-		// No parts should be returned after the upload is completed:
-		ts.assertListUploadPartsFails(gofakes3.ErrNoSuchUpload, defaultBucket, "foo", id, listUploadPartsOpts{})
+	parts := []types.CompletedPart{
+		ts.uploadPart(defaultBucket, "foo", id, 1, []byte("abc")),
+		ts.uploadPart(defaultBucket, "foo", id, 2, []byte("def")),
+		ts.uploadPart(defaultBucket, "foo", id, 3, []byte("ghi")),
 	}
 
-	// Skip host bucket test case temporarily as it requires a fix in the AWS SDK v2 virtual host addressing
-	// t.Run("location: HostBucket", func(t *testing.T) {
-	// 	ts := newTestServer(t, withHostBucket())
-	// 	defer ts.Close()
-	// 	doUpload(ts)
-	// })
+	ts.assertListUploadParts(defaultBucket, "foo", id,
+		listUploadPartsOpts{}.withCompletedParts(parts...))
 
-	t.Run("location: PathBucket", func(t *testing.T) {
-		ts := newTestServer(t)
-		defer ts.Close()
-		doUpload(ts)
+	ts.assertCompleteUpload(defaultBucket, "foo", id, parts, []byte("abcdefghi"))
+
+	// No parts should be returned after the upload is completed:
+	ts.assertListUploadPartsFails(gofakes3.ErrNoSuchUpload, defaultBucket, "foo", id, listUploadPartsOpts{})
+}
+
+// TestListMultipartUploadPartsPagination checks that paginating through the
+// parts of a multipart upload with a small MaxParts returns every part exactly
+// once, with the correct PartNumber, and that the marker advances rather than
+// looping. See https://github.com/rclone/rclone/issues/9460.
+func TestListMultipartUploadPartsPagination(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+
+	ctx := context.Background()
+	svc := ts.s3Client()
+
+	const object = "foo"
+	id := ts.createMultipartUpload(defaultBucket, object, nil)
+
+	// Upload parts 1..numParts with distinct bodies so each ETag is unique.
+	const numParts = 7
+	wantETag := map[int32]string{}
+	for i := int32(1); i <= numParts; i++ {
+		part := ts.uploadPart(defaultBucket, object, id, i, []byte{'p', byte('0' + i)})
+		wantETag[i] = *part.ETag
+	}
+
+	// Page through the parts with MaxParts strictly less than numParts so
+	// more than one page is required.
+	const maxParts = 3
+	seen := map[int32]bool{}
+	var marker *string
+	for page := 1; ; page++ {
+		if page > numParts+1 {
+			t.Fatalf("pagination did not terminate after %d pages: marker stuck", page)
+		}
+
+		rs, err := svc.ListParts(ctx, &s3.ListPartsInput{
+			Bucket:           aws.String(defaultBucket),
+			Key:              aws.String(object),
+			UploadId:         aws.String(id),
+			MaxParts:         aws.Int32(maxParts),
+			PartNumberMarker: marker,
+		})
+		ts.OK(err)
+
+		for _, p := range rs.Parts {
+			pn := *p.PartNumber
+			if pn < 1 || pn > numParts {
+				t.Fatalf("page %d: got out-of-range PartNumber %d", page, pn)
+			}
+			if seen[pn] {
+				t.Fatalf("page %d: duplicate PartNumber %d returned (pagination loop)", page, pn)
+			}
+			seen[pn] = true
+			if got := *p.ETag; got != wantETag[pn] {
+				t.Fatalf("page %d: PartNumber %d ETag mismatch: got %s want %s", page, pn, got, wantETag[pn])
+			}
+		}
+
+		if rs.IsTruncated == nil || !*rs.IsTruncated {
+			break
+		}
+		marker = rs.NextPartNumberMarker
+	}
+
+	for i := int32(1); i <= numParts; i++ {
+		if !seen[i] {
+			t.Fatalf("part %d was never returned by pagination", i)
+		}
+	}
+}
+
+// TestCompleteMultipartUploadAgain checks completing an upload again,
+// as a client which didn't get the response would, succeeds with the
+// same result, but completing an aborted upload doesn't.
+func TestCompleteMultipartUploadAgain(t *testing.T) {
+	ctx := context.Background()
+	ts := newTestServer(t)
+	defer ts.Close()
+	svc := ts.s3Client()
+
+	id := ts.createMultipartUpload(defaultBucket, "foo", nil)
+	parts := []types.CompletedPart{
+		ts.uploadPart(defaultBucket, "foo", id, 1, []byte("abc")),
+		ts.uploadPart(defaultBucket, "foo", id, 2, []byte("def")),
+	}
+	in := &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(defaultBucket),
+		Key:             aws.String("foo"),
+		UploadId:        aws.String(id),
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+	}
+	first, err := svc.CompleteMultipartUpload(ctx, in)
+	ts.OK(err)
+	again, err := svc.CompleteMultipartUpload(ctx, in)
+	ts.OK(err)
+	if *first.ETag != *again.ETag {
+		t.Errorf("ETag: first %s again %s", *first.ETag, *again.ETag)
+	}
+	head, err := svc.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(defaultBucket), Key: aws.String("foo")})
+	ts.OK(err)
+	if *first.ETag != *head.ETag {
+		t.Errorf("ETag: complete %s head %s", *first.ETag, *head.ETag)
+	}
+	ts.assertObject(defaultBucket, "foo", nil, "abcdef")
+
+	// The upload is gone though
+	ts.assertListUploadPartsFails(gofakes3.ErrNoSuchUpload, defaultBucket, "foo", id, listUploadPartsOpts{})
+
+	// The result is only for the same key
+	in.Key = aws.String("bar")
+	_, err = svc.CompleteMultipartUpload(ctx, in)
+	if !s3HasErrorCode(err, gofakes3.ErrNoSuchUpload) {
+		t.Fatal("expected NoSuchUpload for a different key, got", err)
+	}
+
+	// An aborted upload can't be completed
+	id = ts.createMultipartUpload(defaultBucket, "foo", nil)
+	part := ts.uploadPart(defaultBucket, "foo", id, 1, []byte("abc"))
+	ts.assertAbortMultipartUpload(defaultBucket, "foo", gofakes3.UploadID(id))
+	_, err = svc.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(defaultBucket),
+		Key:             aws.String("foo"),
+		UploadId:        aws.String(id),
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: []types.CompletedPart{part}},
 	})
+	if !s3HasErrorCode(err, gofakes3.ErrNoSuchUpload) {
+		t.Fatal("expected NoSuchUpload after abort, got", err)
+	}
 }

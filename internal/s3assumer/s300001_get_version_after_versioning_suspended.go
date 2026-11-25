@@ -4,12 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // It's not clear from the docs what S3 does when versioning has been enabled,
@@ -39,7 +38,7 @@ func (t *S300001GetVersionAfterVersioningSuspended) Run(ctx *Context) error {
 
 	for i := 0; i < 3; i++ {
 		body := ctx.RandBytes(32)
-		rs, err := client.PutObject(ctx, &s3.PutObjectInput{
+		rs, err := client.PutObject(ctx.Context, &s3.PutObjectInput{
 			Key:    aws.String(key),
 			Body:   bytes.NewReader(body),
 			Bucket: bucket,
@@ -55,33 +54,38 @@ func (t *S300001GetVersionAfterVersioningSuspended) Run(ctx *Context) error {
 		versions[ver] = body
 	}
 
-	if _, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+	if _, err := client.PutBucketVersioning(ctx.Context, &s3.PutBucketVersioningInput{
 		Bucket: bucket,
-		VersioningConfiguration: &s3types.VersioningConfiguration{
-			Status: s3types.BucketVersioningStatusSuspended,
+		VersioningConfiguration: &types.VersioningConfiguration{
+			Status: "Suspended",
 		},
 	}); err != nil {
 		return err
 	}
 
 	{
-		vers, err := client.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: bucket})
+		vers, err := client.GetBucketVersioning(ctx.Context, &s3.GetBucketVersioningInput{Bucket: bucket})
 		if err != nil {
 			return err
 		}
 		status := vers.Status
-		if status != s3types.BucketVersioningStatusSuspended {
+		if status != "Suspended" {
 			return fmt.Errorf("unexpected status %q", status)
 		}
 	}
 
-	readCloseBody := func(rdr io.ReadCloser) ([]byte, error) {
-		defer rdr.Close()
-		return ioutil.ReadAll(rdr)
+	readCloseBody := func(rdr io.ReadCloser) (out []byte, err error) {
+		defer func() {
+			closeErr := rdr.Close()
+			if closeErr != nil && err == nil {
+				err = closeErr
+			}
+		}()
+		return io.ReadAll(rdr)
 	}
 
 	for ver, body := range versions {
-		rs, err := client.GetObject(ctx, &s3.GetObjectInput{
+		rs, err := client.GetObject(ctx.Context, &s3.GetObjectInput{
 			Key:       aws.String(key),
 			Bucket:    bucket,
 			VersionId: aws.String(ver),

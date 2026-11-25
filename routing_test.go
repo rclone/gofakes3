@@ -2,22 +2,16 @@ package gofakes3_test
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/rclone/gofakes3"
 )
-
-func assertStatus(ts *testServer, t *testing.T, url string, code int, descr string) {
-	t.Helper()
-	client := httpClient()
-	rs, err := client.Head(ts.url(url))
-	ts.OK(err)
-	if rs.StatusCode != code {
-		t.Fatal("expected status", code, "found", rs.StatusCode, "descr", descr)
-	}
-}
 
 func TestRoutingSlashes(t *testing.T) {
 	ts := newTestServer(t, withoutInitialBuckets())
@@ -25,116 +19,188 @@ func TestRoutingSlashes(t *testing.T) {
 	ts.backendCreateBucket("test")
 	ts.backendPutString("test", "obj", nil, "yep")
 
+	client := httpClient()
 
-	assertStatus(ts, t, "nope", 404, "missing bucket") // sanity check missing URL
-	assertStatus(ts, t, "test", 200, "only bucket without slash")
-	assertStatus(ts, t, "test/", 200, "only bucket with slash")
-	assertStatus(ts, t, "test//", 404, "object \"/\"") // obj '/' does not exist
-	assertStatus(ts, t, "test/nope", 404, "missing object")
-	assertStatus(ts, t, "test/obj", 200, "existing object")
-	assertStatus(ts, t, "test/obj/", 404, "trailing slash in object key")
-	assertStatus(ts, t, "test/obj//", 404, "two trailing slashes in object key")
-}
-
-func TestRoutingMoreSlashes(t *testing.T) {
-	testData := [][]string{
-		{".", "singledot", "0"},
-		{"./", "dotslash", "0"},
-		{"./.", "dotslashdot", "0"},
-		{"/.", "slashdot", "0"},
-		{"/./", "slashdotslash", "0"},
-		{"foo/../bar", "singledoubledot", "0"},
-		{"foo/../bar/../baz", "twodoubledots", "0"},
-		{"/", "singleslash", "0"},
-		{"//", "doubleslash", "0"},
-		{"///", "threeslashes", "0"},
-		{"////", "fourslashes", "0"},
-		{"/////", "fiveslashes", "0"},
-		{"/a", "leadingsingleslash", "0"},
-		{"//a", "leadingdoubleslash", "0"},
-		{"///a", "leadingthreeslashes", "0"},
-		{"////a", "leadingfourslashes", "0"},
-		{"/////a", "leadingfiveslashes", "0"},
-		{"a/", "trailingsingleslash", "0"},
-		{"a//", "trailingdoubleslash", "0"},
-		{"a///", "trailingthreeslashes", "0"},
-		{"a////", "trailingfourslashes", "0"},
-		{"a/////", "trailingfiveslashes", "0"},
-		{"a/a", "middlesingleslash", "0"},
-		{"a//a", "middledoubleslash", "0"},
-		{"a///a", "middlethreeslashes", "0"},
-		{"a////a", "middlefourslashes", "0"},
-		{"a/////a", "middlefiveslashes", "0"},
-		{"a/a/a/a", "lotofmiddlesingleslashes", "0"},
-		{"a//a//a//a", "lotofmiddledoubleslashes", "0"},
-		{"a///a///a///a", "lotofmiddlethreeslashes", "0"},
-		{"a////a////a////a", "lotofmiddlefourslashes", "0"},
-		{"a/////a/////a/////a", "lotofmiddlefiveslashes", "0"},
-	}
-
-	testRoutingMoreSlashes(t, testData)
-
-	// reset and reverse testData
-	for i, j := 0, len(testData)-1; i < j; i, j = i+1, j-1 {
-		testData[i], testData[j] = testData[j], testData[i];
-		testData[i][2] = "0"
-		testData[j][2] = "0"
-	}
-	if len(testData) % 2 != 0 {
-		testData[((len(testData)-1) / 2)][2] = "0"
-	}
-
-	// re-run test in reverse order
-	testRoutingMoreSlashes(t, testData)
-
-}
-
-// TestRoutingPutObjectAcl verifies that PUT /bucket/key?acl is accepted as a
-// no-op and does not overwrite the object body with the ACL XML payload.
-func TestRoutingPutObjectAcl(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-
-	const body = "hello world"
-	ts.backendPutString(defaultBucket, "obj", nil, body)
-
-	svc := ts.s3Client()
-	_, err := svc.PutObjectAcl(context.TODO(), &s3.PutObjectAclInput{
-		Bucket: aws.String(defaultBucket),
-		Key:    aws.String("obj"),
-		ACL:    s3types.ObjectCannedACLPublicRead,
-	})
-	ts.OK(err)
-
-	ts.assertObject(defaultBucket, "obj", nil, body)
-}
-
-func testRoutingMoreSlashes(t *testing.T, testData [][]string) {
-	ts := newTestServer(t, withoutInitialBuckets())
-	defer ts.Close()
-	ts.backendCreateBucket("test")
-
-	checkObjects := func() {
+	assertStatus := func(url string, code int) {
 		t.Helper()
-		for _, obj := range testData {
-			if obj[2] == "0" {
-				assertStatus(ts, t, obj[0], 404, obj[1])
-				continue
-			}
-			if obj[2] == "1" {
-				ts.assertObject("test", obj[0], nil, obj[1])
-				continue
-			}
-			t.Fatal("unexpected test data", obj)
+		rs, err := client.Head(ts.url(url))
+		ts.OK(err)
+		if rs.StatusCode != code {
+			t.Fatal("expected status", code, "found", rs.StatusCode)
 		}
 	}
 
-	checkObjects()
+	assertStatus("nope", 404) // sanity check missing URL
+	assertStatus("test", 200)
+	assertStatus("test/", 200)
+	assertStatus("test/nope", 404)
+	assertStatus("test/obj", 200)
 
-	for _, obj := range testData {
-		ts.backendPutString("test", obj[0], nil, obj[1])
-		obj[2] = "1"
-		ts.assertObject("test", obj[0], nil, obj[1])
-		checkObjects()
+	// Slashes at the start and end of keys are part of the key
+	assertStatus("test/obj/", 404)
+	assertStatus("test//obj", 404)
+	ts.backendPutString("test", "dir/", nil, "")
+	ts.backendPutString("test", "/rooted", nil, "")
+	assertStatus("test/dir/", 200)
+	assertStatus("test/dir", 404)
+	assertStatus("test//rooted", 200)
+	assertStatus("test/rooted", 404)
+
+	// Slashes before the bucket are ignored
+	rs, err := client.Head(ts.server.URL + "//test/obj")
+	ts.OK(err)
+	if rs.StatusCode != 200 {
+		t.Fatal("expected status 200 for //test/obj, found", rs.StatusCode)
+	}
+}
+
+// TestRoutingUnsupportedSubresources checks requests for sub-resources
+// which aren't implemented are refused, or answered as S3 does when
+// they aren't configured, and don't touch the object or bucket they
+// name.
+func TestRoutingUnsupportedSubresources(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	ctx := context.Background()
+	svc := ts.s3Client()
+	ts.backendPutString(defaultBucket, "object", nil, "hello")
+
+	for _, test := range []struct {
+		name string
+		code gofakes3.ErrorCode // "" for success
+		call func() error
+	}{
+		{"PutObjectAcl", "", func() error {
+			_, err := svc.PutObjectAcl(ctx, &s3.PutObjectAclInput{
+				Bucket: aws.String(defaultBucket),
+				Key:    aws.String("object"),
+				ACL:    types.ObjectCannedACLPrivate,
+			})
+			return err
+		}},
+		{"GetObjectAcl", "", func() error {
+			_, err := svc.GetObjectAcl(ctx, &s3.GetObjectAclInput{
+				Bucket: aws.String(defaultBucket),
+				Key:    aws.String("object"),
+			})
+			return err
+		}},
+		{"PutBucketTagging", gofakes3.ErrNotImplemented, func() error {
+			_, err := svc.PutBucketTagging(ctx, &s3.PutBucketTaggingInput{
+				Bucket:  aws.String(defaultBucket),
+				Tagging: &types.Tagging{TagSet: []types.Tag{{Key: aws.String("k"), Value: aws.String("v")}}},
+			})
+			return err
+		}},
+		{"PutObjectRetention", gofakes3.ErrInvalidRequest, func() error {
+			_, err := svc.PutObjectRetention(ctx, &s3.PutObjectRetentionInput{
+				Bucket:    aws.String(defaultBucket),
+				Key:       aws.String("object"),
+				Retention: &types.ObjectLockRetention{Mode: types.ObjectLockRetentionModeGovernance},
+			})
+			return err
+		}},
+		{"PutBucketPolicy", gofakes3.ErrNotImplemented, func() error {
+			_, err := svc.PutBucketPolicy(ctx, &s3.PutBucketPolicyInput{
+				Bucket: aws.String(defaultBucket),
+				Policy: aws.String("{}"),
+			})
+			return err
+		}},
+		{"DeleteBucketPolicy", "", func() error {
+			_, err := svc.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{
+				Bucket: aws.String(defaultBucket),
+			})
+			return err
+		}},
+		{"DeleteBucketEncryption", "", func() error {
+			_, err := svc.DeleteBucketEncryption(ctx, &s3.DeleteBucketEncryptionInput{
+				Bucket: aws.String(defaultBucket),
+			})
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.call()
+			if test.code == "" {
+				ts.OK(err)
+			} else if !s3HasErrorCode(err, test.code) {
+				t.Fatal("expected", test.code, "found", err)
+			}
+			ts.assertObject(defaultBucket, "object", nil, "hello")
+		})
+	}
+
+	t.Run("NoSuchBucket", func(t *testing.T) {
+		_, err := svc.DeleteBucketPolicy(ctx, &s3.DeleteBucketPolicyInput{
+			Bucket: aws.String("missing"),
+		})
+		if !s3HasErrorCode(err, gofakes3.ErrNoSuchBucket) {
+			t.Fatal("expected NoSuchBucket, found", err)
+		}
+	})
+}
+
+// TestRoutingMisusedSubresources checks requests for implemented
+// sub-resources with a method they aren't implemented for are refused,
+// and don't touch the object or bucket they name.
+func TestRoutingMisusedSubresources(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	ts.backendPutString(defaultBucket, "object", nil, "hello")
+	client := httpClient()
+
+	for _, test := range []struct {
+		method string
+		url    string
+	}{
+		{"PUT", defaultBucket + "/object?attributes"},
+		{"DELETE", defaultBucket + "/object?attributes"},
+		{"PUT", defaultBucket + "/object?location"},
+		{"DELETE", defaultBucket + "/object?delete"},
+		{"DELETE", defaultBucket + "?location"},
+		{"DELETE", defaultBucket + "?delete"},
+		{"PUT", defaultBucket + "?attributes"},
+	} {
+		t.Run(test.method+" "+test.url, func(t *testing.T) {
+			rq, err := http.NewRequest(test.method, ts.url(test.url), strings.NewReader("data"))
+			ts.OK(err)
+			rs, err := client.Do(rq)
+			ts.OK(err)
+			_ = rs.Body.Close()
+			if rs.StatusCode != http.StatusBadRequest {
+				t.Error("expected status 400, found", rs.StatusCode)
+			}
+			// Check the bucket and object are untouched, restoring
+			// them for the next test if not
+			ctx := context.Background()
+			if exists, _ := ts.backend.BucketExists(ctx, defaultBucket); !exists {
+				t.Error("bucket deleted")
+				ts.OK(ts.backend.CreateBucket(ctx, defaultBucket))
+			}
+			obj, err := ts.backend.GetObject(ctx, defaultBucket, "object", nil)
+			if err != nil {
+				t.Error("object not found:", err)
+			} else {
+				data, _ := io.ReadAll(obj.Contents)
+				_ = obj.Contents.Close()
+				if string(data) != "hello" {
+					t.Errorf("object changed to %q", data)
+				}
+			}
+			ts.backendPutString(defaultBucket, "object", nil, "hello")
+		})
+	}
+
+	// The methods they are implemented for still work
+	for _, url := range []string{defaultBucket + "/object?attributes", defaultBucket + "?location"} {
+		rq, err := http.NewRequest("HEAD", ts.url(url), nil)
+		ts.OK(err)
+		rs, err := client.Do(rq)
+		ts.OK(err)
+		_ = rs.Body.Close()
+		if rs.StatusCode != http.StatusOK {
+			t.Error(url, "expected status 200, found", rs.StatusCode)
+		}
 	}
 }

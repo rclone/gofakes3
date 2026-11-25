@@ -36,7 +36,7 @@ func (s S300002DeleteNonexistentVersion) Run(ctx *Context) error {
 	// them, the object still exists:
 	for i := 0; i < 2; i++ {
 		body := ctx.RandBytes(32)
-		vrs, err := client.PutObject(ctx, &s3.PutObjectInput{
+		vrs, err := client.PutObject(ctx.Context, &s3.PutObjectInput{
 			Key:    aws.String(key),
 			Bucket: bucket,
 			Body:   bytes.NewReader(body),
@@ -56,7 +56,7 @@ func (s S300002DeleteNonexistentVersion) Run(ctx *Context) error {
 	}
 
 	// Delete should succeed the first time. An object version will remain after this.
-	if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	if _, err := client.DeleteObject(ctx.Context, &s3.DeleteObjectInput{
 		Key:       aws.String(key),
 		Bucket:    bucket,
 		VersionId: aws.String(versionID),
@@ -66,7 +66,7 @@ func (s S300002DeleteNonexistentVersion) Run(ctx *Context) error {
 
 	// Now we should get the answer about what S3 actually does when you try to delete
 	// a version that is known not to exist!
-	if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
+	if _, err := client.DeleteObject(ctx.Context, &s3.DeleteObjectInput{
 		Key:       aws.String(key),
 		Bucket:    bucket,
 		VersionId: aws.String(versionID),

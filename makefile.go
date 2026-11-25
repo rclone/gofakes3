@@ -19,7 +19,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"go.shabbyrobe.org/gocovmerge"
+	"github.com/shabbyrobe/gocovmerge"
 	"golang.org/x/tools/cover"
 )
 
@@ -56,12 +56,22 @@ func run() error {
 
 func runBuildDocker() error {
 	cmd := command(
-		"docker", "buildx", "build",
-		"--platform", "linux/amd64,linux/arm64",
-		"-t", "johannesboyne/gofakes3",
-		".",
+		"go", "build", "-a",
+		"-installsuffix", "cgo",
+		"-o", "./build/main",
+		"./cmd/gofakes3",
 	)
-	return cmd.Run()
+	cmd.Env = append(cmd.Env, "GO111MODULE=on", "CGO_ENABLED=0", "GOOS=linux")
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	cmd = command("docker", "build", "-t", "rclone/gofakes3", ".")
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func runRelease(args []string) error {

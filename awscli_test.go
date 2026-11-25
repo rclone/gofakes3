@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path"
 	"reflect"
@@ -14,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johannesboyne/gofakes3"
+	"github.com/rclone/gofakes3"
 )
 
 func TestCLILsBuckets(t *testing.T) {
@@ -152,10 +153,11 @@ func (tc *testCLI) command(method string, subcommand string, args ...string) *ex
 
 	log.Println("cli args:", cmdArgs)
 
-	cmd.Env = []string{
+	cmd.Env = append(os.Environ(),
 		"AWS_ACCESS_KEY_ID=key",
 		"AWS_SECRET_ACCESS_KEY=secret",
-	}
+		"AWS_EC2_METADATA_DISABLED=true", // See: https://github.com/aws/aws-cli/issues/5234#issuecomment-705831465
+	)
 	return cmd
 }
 
@@ -168,21 +170,14 @@ func (tc *testCLI) run(method string, subcommand string, args ...string) {
 	tc.OK(err)
 }
 
-func (tc *testCLI) output(method string, subcommand string, args ...string) (out []byte) {
-	tc.Helper()
-	out, err := tc.command(method, subcommand, args...).Output()
-	if _, ok := err.(*exec.Error); ok {
-		tc.Skip("aws cli not found on $PATH")
-	}
-	tc.OK(err)
-	return out
-}
-
 func (tc *testCLI) combinedOutput(method string, subcommand string, args ...string) (out []byte) {
 	tc.Helper()
 	out, err := tc.command(method, subcommand, args...).CombinedOutput()
 	if _, ok := err.(*exec.Error); ok {
 		tc.Skip("aws cli not found on $PATH")
+	}
+	if err != nil {
+		tc.Log(string(out))
 	}
 	tc.OK(err)
 	return out
@@ -275,14 +270,6 @@ func (tc *testCLI) rm(fileURL string) {
 
 func (tc *testCLI) fileArg(bucket string, file string) string {
 	return fmt.Sprintf("s3://%s", path.Join(bucket, file))
-}
-
-func (tc *testCLI) fileArgs(bucket string, files ...string) []string {
-	out := make([]string, len(files))
-	for i, f := range files {
-		out[i] = tc.fileArg(bucket, f)
-	}
-	return out
 }
 
 type cliTime time.Time

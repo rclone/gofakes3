@@ -1,10 +1,11 @@
 package gofakes3
 
 import (
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"time"
+
+	xml "github.com/minio/xxml"
 )
 
 // Error codes are documented here:
@@ -16,6 +17,10 @@ const (
 
 	// The Content-MD5 you specified did not match what we received.
 	ErrBadDigest ErrorCode = "BadDigest"
+
+	// ErrBadRequest is returned for a request which is malformed in a
+	// way no more specific error describes.
+	ErrBadRequest ErrorCode = "BadRequest"
 
 	ErrBucketAlreadyExists ErrorCode = "BucketAlreadyExists"
 
@@ -47,10 +52,29 @@ const (
 	// The Content-MD5 you specified is not valid.
 	ErrInvalidDigest ErrorCode = "InvalidDigest"
 
-	ErrInvalidRange         ErrorCode = "InvalidRange"
-	ErrInvalidToken         ErrorCode = "InvalidToken"
-	ErrKeyTooLong           ErrorCode = "KeyTooLongError" // This is not a typo: Error is part of the string, but redundant in the constant name
-	ErrMalformedPOSTRequest ErrorCode = "MalformedPOSTRequest"
+	// The proposed upload exceeds the maximum allowed object size.
+	ErrEntityTooLarge ErrorCode = "EntityTooLarge"
+
+	ErrInvalidRange       ErrorCode = "InvalidRange"
+	ErrInvalidRequest     ErrorCode = "InvalidRequest"
+	ErrInvalidTag         ErrorCode = "InvalidTag"
+	ErrInvalidBucketState ErrorCode = "InvalidBucketState"
+
+	// These are returned for the configuration of a bucket which
+	// hasn't been set.
+	ErrNoSuchBucketPolicy                        ErrorCode = "NoSuchBucketPolicy"
+	ErrNoSuchCORSConfiguration                   ErrorCode = "NoSuchCORSConfiguration"
+	ErrNoSuchLifecycleConfiguration              ErrorCode = "NoSuchLifecycleConfiguration"
+	ErrNoSuchPublicAccessBlockConfiguration      ErrorCode = "NoSuchPublicAccessBlockConfiguration"
+	ErrNoSuchTagSet                              ErrorCode = "NoSuchTagSet"
+	ErrNoSuchWebsiteConfiguration                ErrorCode = "NoSuchWebsiteConfiguration"
+	ErrObjectLockConfigurationNotFound           ErrorCode = "ObjectLockConfigurationNotFoundError"
+	ErrOwnershipControlsNotFound                 ErrorCode = "OwnershipControlsNotFoundError"
+	ErrReplicationConfigurationNotFound          ErrorCode = "ReplicationConfigurationNotFoundError"
+	ErrServerSideEncryptionConfigurationNotFound ErrorCode = "ServerSideEncryptionConfigurationNotFoundError"
+	ErrInvalidToken                              ErrorCode = "InvalidToken"
+	ErrKeyTooLong                                ErrorCode = "KeyTooLongError" // This is not a typo: Error is part of the string, but redundant in the constant name
+	ErrMalformedPOSTRequest                      ErrorCode = "MalformedPOSTRequest"
 
 	// One or more of the specified parts could not be found. The part might
 	// not have been uploaded, or the specified entity tag might not have
@@ -63,6 +87,9 @@ const (
 
 	ErrInvalidURI ErrorCode = "InvalidURI"
 
+	// The request body was bigger than the maximum allowed.
+	ErrMaxMessageLengthExceeded ErrorCode = "MaxMessageLengthExceeded"
+
 	ErrMetadataTooLarge ErrorCode = "MetadataTooLarge"
 	ErrMethodNotAllowed ErrorCode = "MethodNotAllowed"
 	ErrMalformedXML     ErrorCode = "MalformedXML"
@@ -72,9 +99,6 @@ const (
 
 	// See BucketNotFound() for a helper function for this error:
 	ErrNoSuchBucket ErrorCode = "NoSuchBucket"
-
-	// The specified bucket does not exist.
-	ErrNonExistentBucket ErrorCode = "NonExistentBucket"
 
 	// See KeyNotFound() for a helper function for this error:
 	ErrNoSuchKey ErrorCode = "NoSuchKey"
@@ -88,15 +112,17 @@ const (
 	// No need to retransmit the object
 	ErrNotModified ErrorCode = "NotModified"
 
-	// At least one of the preconditions you specified did not hold
+	// ErrPreconditionFailed is returned when a condition given in the
+	// request, such as If-Match, isn't met.
 	ErrPreconditionFailed ErrorCode = "PreconditionFailed"
-
-	// A conflicting conditional operation is currently in progress against this resource
-	ErrConditionalRequestConflict ErrorCode = "ConditionalRequestConflict"
 
 	ErrRequestTimeTooSkewed ErrorCode = "RequestTimeTooSkewed"
 	ErrTooManyBuckets       ErrorCode = "TooManyBuckets"
 	ErrNotImplemented       ErrorCode = "NotImplemented"
+
+	// The server is overloaded, so the client should retry the request
+	// later, more slowly.
+	ErrSlowDown ErrorCode = "SlowDown"
 
 	ErrInternal ErrorCode = "InternalError"
 )
@@ -232,10 +258,6 @@ func (e ErrorCode) Message() string {
 		return "The difference between the request time and the current time is too large"
 	case ErrMalformedXML:
 		return "The XML you provided was not well-formed or did not validate against our published schema"
-	case ErrPreconditionFailed:
-		return "At least one of the preconditions you specified did not hold"
-	case ErrConditionalRequestConflict:
-		return "A conflicting conditional operation is currently in progress against this resource"
 	default:
 		return ""
 	}
@@ -244,16 +266,13 @@ func (e ErrorCode) Message() string {
 func (e ErrorCode) Status() int {
 	switch e {
 	case ErrBucketAlreadyExists,
-		ErrBucketNotEmpty:
+		ErrBucketNotEmpty,
+		ErrInvalidBucketState:
 		return http.StatusConflict
-
-	case ErrConditionalRequestConflict:
-		return http.StatusConflict
-
-	case ErrPreconditionFailed:
-		return http.StatusPreconditionFailed
 
 	case ErrBadDigest,
+		ErrBadRequest,
+		ErrEntityTooLarge,
 		ErrIllegalVersioningConfiguration,
 		ErrIncompleteBody,
 		ErrIncorrectNumberOfFilesInPostRequest,
@@ -263,9 +282,12 @@ func (e ErrorCode) Status() int {
 		ErrInvalidDigest,
 		ErrInvalidPart,
 		ErrInvalidPartOrder,
+		ErrInvalidRequest,
+		ErrInvalidTag,
 		ErrInvalidToken,
 		ErrInvalidURI,
 		ErrKeyTooLong,
+		ErrMaxMessageLengthExceeded,
 		ErrMetadataTooLarge,
 		ErrMethodNotAllowed,
 		ErrMalformedPOSTRequest,
@@ -282,14 +304,30 @@ func (e ErrorCode) Status() int {
 	case ErrNoSuchBucket,
 		ErrNoSuchKey,
 		ErrNoSuchUpload,
-		ErrNoSuchVersion:
+		ErrNoSuchVersion,
+		ErrNoSuchBucketPolicy,
+		ErrNoSuchCORSConfiguration,
+		ErrNoSuchLifecycleConfiguration,
+		ErrNoSuchPublicAccessBlockConfiguration,
+		ErrNoSuchTagSet,
+		ErrNoSuchWebsiteConfiguration,
+		ErrObjectLockConfigurationNotFound,
+		ErrOwnershipControlsNotFound,
+		ErrReplicationConfigurationNotFound,
+		ErrServerSideEncryptionConfigurationNotFound:
 		return http.StatusNotFound
 
 	case ErrNotImplemented:
 		return http.StatusNotImplemented
 
+	case ErrSlowDown:
+		return http.StatusServiceUnavailable
+
 	case ErrNotModified:
 		return http.StatusNotModified
+
+	case ErrPreconditionFailed:
+		return http.StatusPreconditionFailed
 
 	case ErrMissingContentLength:
 		return http.StatusLengthRequired

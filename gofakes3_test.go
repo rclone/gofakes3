@@ -3,46 +3,55 @@ package gofakes3_test
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
+	"context"
 	"encoding/base64"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"hash/crc64"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
+	xml "github.com/minio/xxml"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/johannesboyne/gofakes3"
-	"github.com/johannesboyne/gofakes3/backend/s3mem"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/rclone/gofakes3"
+	"github.com/rclone/gofakes3/s3mem"
 )
+
+var mockR, _ = http.NewRequest(http.MethodGet, "http://localhost:9000", nil)
 
 func TestCreateBucket(t *testing.T) {
 	//@TODO(jb): implement them for sanity reasons
+	ctx := context.Background()
 
 	ts := newTestServer(t)
 	defer ts.Close()
 
 	svc := ts.s3Client()
 
-	ts.OKAll(svc.CreateBucket(t.Context(), &s3.CreateBucketInput{
+	ts.OKAll(svc.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String("testbucket"),
 	}))
-	ts.OKAll(svc.HeadBucket(t.Context(), &s3.HeadBucketInput{
+	ts.OKAll(svc.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String("testbucket"),
 	}))
-	ts.OKAll(svc.PutObject(t.Context(), &s3.PutObjectInput{
+	ts.OKAll(svc.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String("testbucket"),
 		Key:    aws.String("ObjectKey"),
 		Body:   bytes.NewReader([]byte(`{"test": "foo"}`)),
@@ -50,7 +59,7 @@ func TestCreateBucket(t *testing.T) {
 			"Key": "MetadataValue",
 		},
 	}))
-	ts.OKAll(svc.GetObject(t.Context(), &s3.GetObjectInput{
+	ts.OKAll(svc.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String("testbucket"),
 		Key:    aws.String("ObjectKey"),
 	}))
@@ -59,11 +68,12 @@ func TestCreateBucket(t *testing.T) {
 func TestListBuckets(t *testing.T) {
 	ts := newTestServer(t, withoutInitialBuckets())
 	defer ts.Close()
+	ctx := context.Background()
 	svc := ts.s3Client()
 
 	assertBuckets := func(expected ...string) {
 		t.Helper()
-		rs, err := svc.ListBuckets(t.Context(), &s3.ListBucketsInput{})
+		rs, err := svc.ListBuckets(ctx, &s3.ListBucketsInput{})
 		ts.OK(err)
 
 		var found []string
@@ -80,7 +90,7 @@ func TestListBuckets(t *testing.T) {
 
 	assertBucketTime := func(bucket string, created time.Time) {
 		t.Helper()
-		rs, err := svc.ListBuckets(t.Context(), &s3.ListBucketsInput{})
+		rs, err := svc.ListBuckets(ctx, &s3.ListBucketsInput{})
 		ts.OK(err)
 
 		for _, v := range rs.Buckets {
@@ -117,9 +127,10 @@ func TestListBuckets(t *testing.T) {
 func TestListBucketObjectSize(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
+	ctx := context.Background()
 	svc := ts.s3Client()
 
-	_, err := svc.PutObject(t.Context(), &s3.PutObjectInput{
+	_, err := svc.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(defaultBucket),
 		Key:    aws.String("object"),
 		Body:   bytes.NewReader([]byte("hello")), // size 5
@@ -130,7 +141,7 @@ func TestListBucketObjectSize(t *testing.T) {
 		Bucket: aws.String(defaultBucket),
 	}
 
-	output, err := svc.ListObjectsV2(t.Context(), &listInput) // there should be only 1 object
+	output, err := svc.ListObjectsV2(ctx, &listInput) // there should be only 1 object
 	ts.OK(err)
 
 	if *output.Contents[0].Size != int64(5) {
@@ -141,9 +152,10 @@ func TestListBucketObjectSize(t *testing.T) {
 func TestCreateObject(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
+	ctx := context.Background()
 	svc := ts.s3Client()
 
-	out, err := svc.PutObject(t.Context(), &s3.PutObjectInput{
+	out, err := svc.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(defaultBucket),
 		Key:    aws.String("object"),
 		Body:   bytes.NewReader([]byte("hello")),
@@ -160,14 +172,46 @@ func TestCreateObject(t *testing.T) {
 	}
 }
 
+func TestCreateObjectTrailingHeaders(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	ctx := context.Background()
+	tlsServer := httptest.NewTLSServer(ts.GoFakeS3.Server())
+	defer tlsServer.Close()
+
+	svc := s3.NewFromConfig(aws.Config{Region: "region"}, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(tlsServer.URL)
+		o.UsePathStyle = true
+		o.HTTPClient = tlsServer.Client()
+		o.Credentials = &credentials.StaticCredentialsProvider{Value: aws.Credentials{
+			AccessKeyID:     "dummy-access",
+			SecretAccessKey: "dummy-secret",
+		}}
+	})
+
+	_, err := svc.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:            aws.String(defaultBucket),
+		Key:               aws.String("object"),
+		Body:              bytes.NewReader([]byte("hello")),
+		ChecksumAlgorithm: types.ChecksumAlgorithmSha256,
+	})
+	ts.OK(err)
+
+	obj := ts.backendGetString(defaultBucket, "object", nil)
+	if obj != "hello" {
+		t.Fatal("object creation failed")
+	}
+}
+
 func TestCreateObjectMetadataSizeLimit(t *testing.T) {
 	ts := newTestServer(t, withFakerOptions(
 		gofakes3.WithMetadataSizeLimit(1),
 	))
 	defer ts.Close()
+	ctx := context.Background()
 	svc := ts.s3Client()
 
-	_, err := svc.PutObject(t.Context(), &s3.PutObjectInput{
+	_, err := svc.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:   aws.String(defaultBucket),
 		Key:      aws.String("object"),
 		Metadata: map[string]string{"too": "big"},
@@ -181,33 +225,34 @@ func TestCreateObjectMetadataSizeLimit(t *testing.T) {
 func TestCreateObjectMD5(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
+	ctx := context.Background()
 	svc := ts.s3Client()
 
 	{ // md5 is valid base64 but does not match content:
-		_, err := svc.PutObject(t.Context(), &s3.PutObjectInput{
+		_, err := svc.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:     aws.String(defaultBucket),
 			Key:        aws.String("invalid"),
 			Body:       bytes.NewReader([]byte("hello")),
 			ContentMD5: aws.String("bnVwCg=="),
 		})
-		if !hasErrorCode(err, gofakes3.ErrInvalidDigest) {
+		if !s3HasErrorCode(err, gofakes3.ErrInvalidDigest) {
 			t.Fatal("expected InvalidDigest error, found", err)
 		}
 	}
 
 	{ // md5 is invalid base64:
-		_, err := svc.PutObject(t.Context(), &s3.PutObjectInput{
+		_, err := svc.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:     aws.String(defaultBucket),
 			Key:        aws.String("invalid"),
 			Body:       bytes.NewReader([]byte("hello")),
 			ContentMD5: aws.String("!*@&(*$&"),
 		})
-		if !hasErrorCode(err, gofakes3.ErrInvalidDigest) {
+		if !s3HasErrorCode(err, gofakes3.ErrInvalidDigest) {
 			t.Fatal("expected InvalidDigest error, found", err)
 		}
 	}
 
-	if exists, _ := ts.backendObjectExists(defaultBucket, "invalid"); exists {
+	if ts.backendObjectExists(defaultBucket, "invalid") {
 		t.Fatal("unexpected object")
 	}
 }
@@ -215,17 +260,39 @@ func TestCreateObjectMD5(t *testing.T) {
 func TestCreateObjectWithMissingContentLength(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	client := ts.rawClient()
-	var body []byte
-	rq, err := http.NewRequest("PUT", client.URL(fmt.Sprintf("/%s/yep", defaultBucket)).String(), maskReader(bytes.NewReader(body)))
-	if err != nil {
-		panic(err)
-	}
-	client.SetHeaders(rq, body)
-	rs, _ := client.Do(rq)
+
+	// A PUT with neither a Content-Length nor a chunked body
+	conn, err := net.Dial("tcp", ts.server.Listener.Addr().String())
+	ts.OK(err)
+	defer func() { _ = conn.Close() }()
+	_, err = fmt.Fprintf(conn, "PUT /%s/yep HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", defaultBucket)
+	ts.OK(err)
+	rs, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	ts.OK(err)
+	_ = rs.Body.Close()
 	if rs.StatusCode != http.StatusLengthRequired {
-		t.Fatal()
+		t.Fatal("expected status 411, found", rs.StatusCode)
 	}
+}
+
+// TestCreateObjectChunked checks a PUT with a chunked body and so no
+// Content-Length is accepted.
+func TestCreateObjectChunked(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	client := ts.rawClient()
+	body := []byte("hello")
+	rq, err := http.NewRequest("PUT", client.URL(fmt.Sprintf("/%s/yep", defaultBucket)).String(), maskReader(bytes.NewReader(body)))
+	ts.OK(err)
+	client.SetHeaders(rq, body)
+	rq.Header.Del("Content-Length")
+	rs, err := client.Do(rq)
+	ts.OK(err)
+	_ = rs.Body.Close()
+	if rs.StatusCode != http.StatusOK {
+		t.Fatal("expected status 200, found", rs.StatusCode)
+	}
+	ts.assertObject(defaultBucket, "yep", nil, "hello")
 }
 
 func TestCreateObjectWithInvalidContentLength(t *testing.T) {
@@ -250,7 +317,12 @@ func TestCreateObjectWithInvalidContentLength(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rs.Body.Close()
+	defer func() {
+		err := rs.Body.Close()
+		if err != nil {
+			t.Error(err)
+		}
+	}()
 
 	if rs.StatusCode != http.StatusBadRequest {
 		t.Fatal(rs.StatusCode, "!=", http.StatusBadRequest)
@@ -260,9 +332,10 @@ func TestCreateObjectWithInvalidContentLength(t *testing.T) {
 func TestCreateObjectWithContentDisposition(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
+	ctx := context.Background()
 	svc := ts.s3Client()
 
-	_, err := svc.PutObject(t.Context(), &s3.PutObjectInput{
+	_, err := svc.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:             aws.String(defaultBucket),
 		Key:                aws.String("object"),
 		Body:               bytes.NewReader([]byte("hello")),
@@ -270,13 +343,11 @@ func TestCreateObjectWithContentDisposition(t *testing.T) {
 	})
 	ts.OK(err)
 
-	obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+	obj, err := svc.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(defaultBucket),
 		Key:    aws.String("object"),
 	})
-	if err != nil {
-		t.Fatal("error getting object", err)
-	}
+	ts.OK(err)
 	if obj.ContentDisposition == nil {
 		t.Fatal("missing Content-Disposition")
 	}
@@ -285,162 +356,185 @@ func TestCreateObjectWithContentDisposition(t *testing.T) {
 	}
 }
 
-func TestCreateObjectWithContentEncoding(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-	svc := ts.s3Client()
-
-	_, err := svc.PutObject(t.Context(), &s3.PutObjectInput{
-		Bucket: aws.String(defaultBucket),
-		Key:    aws.String("object"),
-		Body: bytes.NewReader([]byte{ // "hello", gzipped
-			0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xcb, 0x48,
-			0xcd, 0xc9, 0xc9, 0x07, 0x00, 0x86, 0xa6, 0x10, 0x36, 0x05, 0x00, 0x00,
-			0x00,
-		}),
-		ContentType:     aws.String("text/plain"),
-		ContentEncoding: aws.String("gzip"),
-	})
-	ts.OK(err)
-
-	obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
-		Bucket: aws.String(defaultBucket),
-		Key:    aws.String("object"),
-	})
-	if err != nil {
-		t.Fatal("error getting object", err)
-	}
-	gzr, err := gzip.NewReader(obj.Body)
-	if err != nil {
-		t.Fatal("error creating gzip reader", err)
-	}
-	defer gzr.Close()
-	content, err := io.ReadAll(gzr)
-	if err != nil {
-		t.Fatal("error reading body", err)
-	}
-	if !bytes.Equal(content, []byte("hello")) {
-		t.Fatal("incorrect body with Content-Encoding: gzip")
-	}
-}
-
 func TestCreateObjectMetadataAndObjectTagging(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
+	ctx := context.Background()
 	svc := ts.s3Client()
 
-	_, err := svc.PutObject(t.Context(), &s3.PutObjectInput{
+	_, err := svc.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(defaultBucket),
 		Key:    aws.String("object"),
 		Body:   bytes.NewReader([]byte("hello")),
 		Metadata: map[string]string{
-			"Test": "test",
+			"test": "test",
 		},
 	})
 	ts.OK(err)
 
-	_, err = svc.GetObject(t.Context(), &s3.GetObjectInput{
+	_, err = svc.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(defaultBucket),
 		Key:    aws.String("object"),
 	})
 	ts.OK(err)
 
-	head, err := svc.HeadObject(t.Context(), &s3.HeadObjectInput{
+	head, err := svc.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(defaultBucket),
 		Key:    aws.String("object"),
 	})
 	ts.OK(err)
 
-	if head.Metadata["test"] != "test" { // AWS S3 normalizes metadata keys to lowercase
+	if head.Metadata["test"] == "" {
+		t.Fatalf("missing metadata: %+v", head.Metadata)
+	}
+	if head.Metadata["test"] != "test" {
 		t.Fatal("wrong metadata key")
 	}
 
-	_, err = svc.PutObjectTagging(t.Context(), &s3.PutObjectTaggingInput{
+	_, err = svc.PutObjectTagging(ctx, &s3.PutObjectTaggingInput{
 		Bucket: aws.String(defaultBucket),
 		Key:    aws.String("object"),
-		Tagging: &s3types.Tagging{
-			TagSet: []s3types.Tag{
+		Tagging: &types.Tagging{
+			TagSet: []types.Tag{
 				{Key: aws.String("Tag-Test"), Value: aws.String("test")},
 			},
 		},
 	})
 	ts.OK(err)
 
-	head, err = svc.HeadObject(t.Context(), &s3.HeadObjectInput{
+	head, err = svc.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(defaultBucket),
 		Key:    aws.String("object"),
 	})
 	ts.OK(err)
 
-	if head.Metadata["test"] != "test" { // AWS S3 normalizes metadata keys to lowercase
-		t.Fatal("wrong metadata key")
+	if head.Metadata["test"] != "test" {
+		t.Fatalf("wrong metadata after PutObjectTagging: %+v", head.Metadata)
 	}
+	ts.assertObject(defaultBucket, "object", nil, "hello")
 
-	result, err := svc.GetObjectTagging(t.Context(), &s3.GetObjectTaggingInput{
+	result, err := svc.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
 		Bucket: aws.String(defaultBucket),
 		Key:    aws.String("object"),
 	})
 	ts.OK(err)
 
-	if *result.TagSet[0].Key != "Tag-Test" && *result.TagSet[0].Value != "test" {
-		t.Fatalf("tag set wrong: %+v", head.Metadata)
+	if len(result.TagSet) != 1 || *result.TagSet[0].Key != "Tag-Test" || *result.TagSet[0].Value != "test" {
+		t.Fatalf("tag set wrong: %+v", result.TagSet)
 	}
 }
 
 func TestCopyObject(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-	svc := ts.s3Client()
+	ctx := context.Background()
 
 	srcMeta := map[string]string{
 		"Content-Type":   "text/plain",
 		"X-Amz-Meta-One": "src",
 		"X-Amz-Meta-Two": "src",
 	}
-	ts.backendPutString(defaultBucket, "src-key", srcMeta, "content")
 
-	out, err := svc.CopyObject(t.Context(), &s3.CopyObjectInput{
+	for _, test := range []struct {
+		directive types.MetadataDirective
+		want      map[string]string
+	}{
+		{"", map[string]string{"Content-Type": "text/plain", "X-Amz-Meta-One": "src", "X-Amz-Meta-Two": "src"}},
+		{types.MetadataDirectiveCopy, map[string]string{"Content-Type": "text/plain", "X-Amz-Meta-One": "src", "X-Amz-Meta-Two": "src"}},
+		{types.MetadataDirectiveReplace, map[string]string{"Content-Type": "application/json", "X-Amz-Meta-Two": "dst", "X-Amz-Meta-Three": "dst"}},
+	} {
+		t.Run(string(test.directive), func(t *testing.T) {
+			ts := newTestServer(t)
+			defer ts.Close()
+			svc := ts.s3Client()
+			ts.backendPutString(defaultBucket, "src-key", srcMeta, "content")
+
+			out, err := svc.CopyObject(ctx, &s3.CopyObjectInput{
+				Bucket:            aws.String(defaultBucket),
+				Key:               aws.String("dst-key"),
+				CopySource:        aws.String("/" + defaultBucket + "/src-key"),
+				MetadataDirective: test.directive,
+				ContentType:       aws.String("application/json"),
+				Metadata: map[string]string{
+					"Two":   "dst",
+					"Three": "dst",
+				},
+			})
+			ts.OK(err)
+
+			if *out.CopyObjectResult.ETag != `"9a0364b9e99bb480dd25e1f0284c8555"` { // md5("content")
+				ts.Fatal("bad etag", *out.CopyObjectResult.ETag)
+			}
+
+			obj, err := ts.backend.GetObject(mockR.Context(), defaultBucket, "dst-key", nil)
+			ts.OK(err)
+			defer func() {
+				err := obj.Contents.Close()
+				if err != nil {
+					t.Error(err)
+				}
+			}()
+			data, err := io.ReadAll(obj.Contents)
+			ts.OK(err)
+			if string(data) != "content" {
+				t.Fatal("object copying failed")
+			}
+
+			got := map[string]string{}
+			for k, v := range obj.Metadata {
+				if k != "Last-Modified" {
+					got[k] = v
+				}
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("metadata: want %v got %v", test.want, got)
+			}
+		})
+	}
+}
+
+// TestCopyObjectToItself checks copying an object to itself is only
+// allowed if it changes something.
+func TestCopyObjectToItself(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	ctx := context.Background()
+	svc := ts.s3Client()
+	ts.backendPutString(defaultBucket, "object", map[string]string{"X-Amz-Meta-One": "old"}, "content")
+
+	in := &s3.CopyObjectInput{
 		Bucket:     aws.String(defaultBucket),
-		Key:        aws.String("dst-key"),
-		CopySource: aws.String("/" + defaultBucket + "/src-key"),
-		Metadata: map[string]string{
-			"Two":   "dst",
-			"Three": "dst",
-		},
+		Key:        aws.String("object"),
+		CopySource: aws.String("/" + defaultBucket + "/object"),
+		Metadata:   map[string]string{"One": "new"},
+	}
+	_, err := svc.CopyObject(ctx, in)
+	if !s3HasErrorCode(err, gofakes3.ErrInvalidRequest) {
+		t.Fatal("expected InvalidRequest, got", err)
+	}
+
+	in.MetadataDirective = types.MetadataDirectiveReplace
+	_, err = svc.CopyObject(ctx, in)
+	ts.OK(err)
+	head, err := svc.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(defaultBucket),
+		Key:    aws.String("object"),
 	})
 	ts.OK(err)
-
-	if *out.CopyObjectResult.ETag != `"9a0364b9e99bb480dd25e1f0284c8555"` { // md5("content")
-		ts.Fatal("bad etag", *out.CopyObjectResult.ETag)
+	if head.Metadata["one"] != "new" {
+		t.Fatal("metadata not replaced:", head.Metadata)
 	}
+	ts.assertObject(defaultBucket, "object", nil, "content")
 
-	obj, err := ts.backend.GetObject(defaultBucket, "dst-key", nil)
-	ts.OK(err)
-
-	defer obj.Contents.Close()
-	data, err := io.ReadAll(obj.Contents)
-	ts.OK(err)
-
-	if string(data) != "content" {
-		t.Fatal("object copying failed")
-	}
-
-	if v := obj.Metadata["X-Amz-Meta-One"]; v != "src" {
-		t.Fatalf("bad Content-Type: %q", v)
-	}
-
-	if v := obj.Metadata["X-Amz-Meta-Two"]; v != "dst" {
-		t.Fatalf("bad Content-Encoding: %q", v)
-	}
-
-	if v := obj.Metadata["X-Amz-Meta-Three"]; v != "dst" {
-		t.Fatalf("bad Content-Encoding: %q", v)
+	in.MetadataDirective = "BOGUS"
+	_, err = svc.CopyObject(ctx, in)
+	if !s3HasErrorCode(err, gofakes3.ErrInvalidArgument) {
+		t.Fatal("expected InvalidArgument, got", err)
 	}
 }
 
 func TestCopyObjectWithSpecialChars(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
+	ctx := context.Background()
 	svc := ts.s3Client()
 
 	srcMeta := map[string]string{
@@ -450,14 +544,14 @@ func TestCopyObjectWithSpecialChars(t *testing.T) {
 	content := "contents"
 	ts.backendPutString(defaultBucket, srcKey, srcMeta, content)
 	copySource := "/" + defaultBucket + "/" + url.QueryEscape(srcKey)
-	_, err := svc.CopyObject(t.Context(), &s3.CopyObjectInput{
+	_, err := svc.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(defaultBucket),
 		Key:        aws.String("dst-key"),
 		CopySource: aws.String(copySource),
 	})
 	ts.OK(err)
 
-	obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+	obj, err := svc.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(defaultBucket),
 		Key:    aws.String(srcKey),
 	})
@@ -474,6 +568,7 @@ func TestCopyObjectWithSpecialChars(t *testing.T) {
 func TestCopyObjectWithSpecialCharsEscapedInvalied(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
+	ctx := context.Background()
 	svc := ts.s3Client()
 
 	srcMeta := map[string]string{
@@ -483,7 +578,7 @@ func TestCopyObjectWithSpecialCharsEscapedInvalied(t *testing.T) {
 	content := "contents"
 	ts.backendPutString(defaultBucket, srcKey, srcMeta, content)
 	copySource := "/" + defaultBucket + "/src%2key" //invalid encoding
-	_, err := svc.CopyObject(t.Context(), &s3.CopyObjectInput{
+	_, err := svc.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(defaultBucket),
 		Key:        aws.String("dst-key"),
 		CopySource: aws.String(copySource),
@@ -493,85 +588,16 @@ func TestCopyObjectWithSpecialCharsEscapedInvalied(t *testing.T) {
 	}
 }
 
-func TestCopyObjectFullyEncodedSource(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-	svc := ts.s3Client()
-
-	srcMeta := map[string]string{
-		"Content-Type": "text/plain",
-	}
-	srcKey := "path/to/source-file.txt"
-	content := "test content"
-	ts.backendPutString(defaultBucket, srcKey, srcMeta, content)
-
-	// Fully encode the source, including "/" as "%2F"
-	copySource := url.QueryEscape(defaultBucket + "/" + srcKey)
-	_, err := svc.CopyObject(t.Context(), &s3.CopyObjectInput{
-		Bucket:     aws.String(defaultBucket),
-		Key:        aws.String("dst-key"),
-		CopySource: aws.String(copySource),
-	})
-	ts.OK(err)
-
-	obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
-		Bucket: aws.String(defaultBucket),
-		Key:    aws.String("dst-key"),
-	})
-	ts.OK(err)
-	defer obj.Body.Close()
-
-	objContent, err := io.ReadAll(obj.Body)
-	ts.OK(err)
-	if string(objContent) != content {
-		t.Fatalf("object contents mismatch: got %q, want %q", objContent, content)
-	}
-}
-
-func TestCopyObjectFullyEncodedSourceWithSpecialChars(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-	svc := ts.s3Client()
-
-	srcMeta := map[string]string{
-		"Content-Type": "text/plain",
-	}
-	srcKey := "file+name with spaces.txt"
-	content := "test content"
-	ts.backendPutString(defaultBucket, srcKey, srcMeta, content)
-
-	// Fully encode the source, including "/" as "%2F"
-	// The "+" becomes "%2B" and space becomes "+"
-	copySource := url.QueryEscape(defaultBucket + "/" + srcKey)
-	_, err := svc.CopyObject(t.Context(), &s3.CopyObjectInput{
-		Bucket:     aws.String(defaultBucket),
-		Key:        aws.String("dst-key"),
-		CopySource: aws.String(copySource),
-	})
-	ts.OK(err)
-
-	obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
-		Bucket: aws.String(defaultBucket),
-		Key:    aws.String("dst-key"),
-	})
-	ts.OK(err)
-	defer obj.Body.Close()
-
-	objContent, err := io.ReadAll(obj.Body)
-	ts.OK(err)
-	if string(objContent) != content {
-		t.Fatalf("object contents mismatch: got %q, want %q", objContent, content)
-	}
-}
-
 func TestDeleteBucket(t *testing.T) {
+	ctx := context.Background()
+
 	t.Run("delete-empty", func(t *testing.T) {
 		ts := newTestServer(t, withoutInitialBuckets())
 		defer ts.Close()
 		svc := ts.s3Client()
 
 		ts.backendCreateBucket("test")
-		ts.OKAll(svc.DeleteBucket(t.Context(), &s3.DeleteBucketInput{
+		ts.OKAll(svc.DeleteBucket(ctx, &s3.DeleteBucketInput{
 			Bucket: aws.String("test"),
 		}))
 	})
@@ -583,32 +609,18 @@ func TestDeleteBucket(t *testing.T) {
 
 		ts.backendCreateBucket("test")
 		ts.backendPutString("test", "test", nil, "test")
-		_, err := svc.DeleteBucket(t.Context(), &s3.DeleteBucketInput{
+		_, err := svc.DeleteBucket(ctx, &s3.DeleteBucketInput{
 			Bucket: aws.String("test"),
 		})
 		if !hasErrorCode(err, gofakes3.ErrBucketNotEmpty) {
 			t.Fatal("expected ErrBucketNotEmpty, found", err)
 		}
 	})
-
-	t.Run("force-delete-does-not-fail-if-not-empty", func(t *testing.T) {
-		ts := newTestServer(t, withoutInitialBuckets())
-		defer ts.Close()
-		svc := ts.s3Client()
-
-		ts.backendCreateBucket("test")
-		ts.backendPutString("test", "test", nil, "test")
-		_, err := svc.DeleteBucket(t.Context(), &s3.DeleteBucketInput{
-			Bucket: aws.String("test"),
-		})
-		if !hasErrorCode(err, gofakes3.ErrBucketNotEmpty) {
-			t.Fatal("expected ErrBucketNotEmpty, found", err)
-		}
-	})
-
 }
 
 func TestDeleteMulti(t *testing.T) {
+	ctx := context.Background()
+
 	deletedKeys := func(rs *s3.DeleteObjectsOutput) []string {
 		deleted := make([]string, len(rs.Deleted))
 		for idx, del := range rs.Deleted {
@@ -635,10 +647,10 @@ func TestDeleteMulti(t *testing.T) {
 		ts.backendPutString(defaultBucket, "bar", nil, "two")
 		ts.backendPutString(defaultBucket, "baz", nil, "three")
 
-		rs, err := svc.DeleteObjects(t.Context(), &s3.DeleteObjectsInput{
+		rs, err := svc.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 			Bucket: aws.String(defaultBucket),
-			Delete: &s3types.Delete{
-				Objects: []s3types.ObjectIdentifier{
+			Delete: &types.Delete{
+				Objects: []types.ObjectIdentifier{
 					{Key: aws.String("foo")},
 				},
 			},
@@ -657,10 +669,10 @@ func TestDeleteMulti(t *testing.T) {
 		ts.backendPutString(defaultBucket, "bar", nil, "two")
 		ts.backendPutString(defaultBucket, "baz", nil, "three")
 
-		rs, err := svc.DeleteObjects(t.Context(), &s3.DeleteObjectsInput{
+		rs, err := svc.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 			Bucket: aws.String(defaultBucket),
-			Delete: &s3types.Delete{
-				Objects: []s3types.ObjectIdentifier{
+			Delete: &types.Delete{
+				Objects: []types.ObjectIdentifier{
 					{Key: aws.String("bar")},
 					{Key: aws.String("foo")},
 				},
@@ -672,43 +684,15 @@ func TestDeleteMulti(t *testing.T) {
 	})
 }
 
-func TestForceDeleteBucket_BucketExists(t *testing.T) {
-	// Create a test server with no initial buckets
-	ts := newTestServer(t, withoutInitialBuckets())
-	ts.Helper()
-	bucketName := "test-bucket"
-	ts.backendCreateBucket(bucketName)
-
-	// Force delete the bucket
-	err := ts.ForceDeleteBucket(bucketName)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-
-	exists, _ := ts.backendObjectExists(bucketName, "test-bucket")
-	if !exists {
-
-	}
-}
-
-func TestForceDeleteBucket_BucketDoesNotExist(t *testing.T) {
-	ts := newTestServer(t, withoutInitialBuckets())
-
-	bucketName := "nonexistent-bucket"
-	err := ts.ForceDeleteBucket(bucketName)
-	if err == gofakes3.ErrNonExistentBucket {
-		t.Fatalf("expected error %v, got %v", gofakes3.ErrNoSuchBucket, err)
-	}
-}
-
 func TestGetBucketLocation(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
+	ctx := context.Background()
 	svc := ts.s3Client()
 
 	ts.backendPutString(defaultBucket, "foo", nil, "one")
 
-	out, err := svc.GetBucketLocation(t.Context(), &s3.GetBucketLocationInput{
+	out, err := svc.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
 		Bucket: aws.String(defaultBucket),
 	})
 	if err != nil {
@@ -721,10 +705,11 @@ func TestGetBucketLocation(t *testing.T) {
 }
 
 func TestGetObjectRange(t *testing.T) {
+	ctx := context.Background()
 	assertRange := func(ts *testServer, key string, hdr string, expected []byte, fail bool) {
 		ts.Helper()
 		svc := ts.s3Client()
-		obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+		obj, err := svc.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(defaultBucket),
 			Key:    aws.String(key),
 			Range:  aws.String(hdr),
@@ -734,7 +719,12 @@ func TestGetObjectRange(t *testing.T) {
 		}
 		if !fail {
 			ts.OK(err)
-			defer obj.Body.Close()
+			defer func() {
+				err := obj.Body.Close()
+				if err != nil {
+					t.Error(err)
+				}
+			}()
 
 			out, err := io.ReadAll(obj.Body)
 			ts.OK(err)
@@ -779,88 +769,54 @@ func TestGetObjectRange(t *testing.T) {
 	}
 }
 
-func TestGetObjectRangeStatusCode(t *testing.T) {
+// TestGetObjectRangeStatus checks a ranged GET returns 206 Partial
+// Content and a plain GET 200 OK.
+func TestGetObjectRangeStatus(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
-	client := ts.rawClient()
+	ts.backendPutString(defaultBucket, "foo", nil, "testcontent")
+	client := httpClient()
 
-	body := []byte("hello")
-	ts.backendPutBytes(defaultBucket, "foo", nil, body)
-	objURL := client.URL("/" + defaultBucket + "/foo").String()
-
-	getObject := func(rangeHeader string) (int, http.Header, []byte) {
-		t.Helper()
-		req, err := http.NewRequest(http.MethodGet, objURL, nil)
-		ts.OK(err)
-		if rangeHeader != "" {
-			req.Header.Set("Range", rangeHeader)
-		}
-
-		res, err := client.Do(req)
-		ts.OK(err)
-		defer res.Body.Close()
-
-		out, err := io.ReadAll(res.Body)
-		ts.OK(err)
-		return res.StatusCode, res.Header, out
-	}
-
-	rangeStatus, rangeHeader, rangeOut := getObject("bytes=1-3")
-
-	if rangeStatus != http.StatusPartialContent {
-		t.Fatal("expected partial content", rangeStatus)
-	}
-	if rangeHeader.Get("Content-Range") != "bytes 1-3/5" {
-		t.Fatal("unexpected content range", rangeHeader.Get("Content-Range"))
-	}
-	if !bytes.Equal(rangeOut, body[1:4]) {
-		t.Fatal("unexpected ranged response body")
-	}
-
-	normalStatus, normalHeader, _ := getObject("")
-
-	if normalStatus != http.StatusOK {
-		t.Fatal("expected status ok", normalStatus)
-	}
-	if normalHeader.Get("Content-Range") != "" {
-		t.Fatal("unexpected content range", normalHeader.Get("Content-Range"))
-	}
-}
-
-func TestGetObjectRangeOmitsChecksum(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-	client := ts.rawClient()
-
-	meta := map[string]string{"X-Amz-Checksum-Crc32": "NhCmhg=="}
-	ts.backendPutBytes(defaultBucket, "foo", meta, []byte("hello"))
-	objURL := client.URL("/" + defaultBucket + "/foo").String()
-
-	getChecksum := func(rangeHeader string) string {
-		t.Helper()
-		req, err := http.NewRequest(http.MethodGet, objURL, nil)
-		ts.OK(err)
-		if rangeHeader != "" {
-			req.Header.Set("Range", rangeHeader)
-		}
-		res, err := client.Do(req)
-		ts.OK(err)
-		res.Body.Close()
-		return res.Header.Get("X-Amz-Checksum-Crc32")
-	}
-
-	if got := getChecksum("bytes=1-2"); got != "" {
-		t.Fatal("ranged get returned the full object checksum", got)
-	}
-	if got := getChecksum(""); got != "NhCmhg==" {
-		t.Fatal("full get lost the checksum", got)
+	for _, test := range []struct {
+		rnge         string
+		status       int
+		contentRange string
+		body         string
+	}{
+		{"", http.StatusOK, "", "testcontent"},
+		{"bytes=4-7", http.StatusPartialContent, "bytes 4-7/11", "cont"},
+		{"bytes=0-", http.StatusPartialContent, "bytes 0-10/11", "testcontent"},
+		{"bytes=-3", http.StatusPartialContent, "bytes 8-10/11", "ent"},
+	} {
+		t.Run(test.rnge, func(t *testing.T) {
+			rq, err := http.NewRequest("GET", ts.url("/"+defaultBucket+"/foo"), nil)
+			ts.OK(err)
+			if test.rnge != "" {
+				rq.Header.Set("Range", test.rnge)
+			}
+			rs, err := client.Do(rq)
+			ts.OK(err)
+			defer func() { _ = rs.Body.Close() }()
+			body, err := io.ReadAll(rs.Body)
+			ts.OK(err)
+			if rs.StatusCode != test.status {
+				t.Errorf("status: want %d got %d", test.status, rs.StatusCode)
+			}
+			if got := rs.Header.Get("Content-Range"); got != test.contentRange {
+				t.Errorf("Content-Range: want %q got %q", test.contentRange, got)
+			}
+			if string(body) != test.body {
+				t.Errorf("body: want %q got %q", test.body, body)
+			}
+		})
 	}
 }
 
 func TestGetObjectRangeInvalid(t *testing.T) {
+	ctx := context.Background()
 	assertRangeInvalid := func(ts *testServer, key string, hdr string) {
 		svc := ts.s3Client()
-		_, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+		_, err := svc.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(defaultBucket),
 			Key:    aws.String(key),
 			Range:  aws.String(hdr),
@@ -889,6 +845,7 @@ func TestGetObjectRangeInvalid(t *testing.T) {
 }
 
 func TestGetObjectIfNoneMatch(t *testing.T) {
+	ctx := context.Background()
 	objectKey := "foo"
 	assertModified := func(ts *testServer, ifNoneMatch string, shouldModify bool) {
 		svc := ts.s3Client()
@@ -900,10 +857,10 @@ func TestGetObjectIfNoneMatch(t *testing.T) {
 			input.IfNoneMatch = aws.String(ifNoneMatch)
 		}
 
-		_, err := svc.GetObject(t.Context(), &input)
+		_, err := svc.GetObject(ctx, &input)
 		modified := true
 		if err != nil {
-			if !hasErrorCode(err, gofakes3.ErrNotModified) {
+			if !s3HasErrorCode(err, gofakes3.ErrNotModified) {
 				ts.Fatal("get-object-failed", err)
 			}
 
@@ -949,7 +906,10 @@ func TestCreateObjectBrowserUpload(t *testing.T) {
 	}
 
 	upload := func(ts *testServer, bucket string, w *multipart.Writer, body io.Reader) (*http.Response, error) {
-		w.Close()
+		err := w.Close()
+		if err != nil {
+			ts.Error(err)
+		}
 		req, err := http.NewRequest("POST", ts.url("/"+bucket), body)
 		ts.OK(err)
 		req.Header.Set("Content-Type", w.FormDataContentType())
@@ -973,12 +933,17 @@ func TestCreateObjectBrowserUpload(t *testing.T) {
 		if res.StatusCode != expectedCode.Status() {
 			ts.Fatal("bad status", res.StatusCode, "!=", expectedCode.Status())
 		}
-		defer res.Body.Close()
+		defer func() {
+			err := res.Body.Close()
+			if err != nil {
+				ts.Error(err)
+			}
+		}()
 		var errResp gofakes3.ErrorResponse
 		dec := xml.NewDecoder(res.Body)
 		ts.OK(dec.Decode(&errResp))
 
-		if !errors.Is(expectedCode, errResp.Code) {
+		if errResp.Code != expectedCode {
 			ts.Fatal("bad code", errResp.Code, "!=", expectedCode)
 		}
 	}
@@ -991,6 +956,19 @@ func TestCreateObjectBrowserUpload(t *testing.T) {
 		addFile(ts.TT, w, "yep", []byte("stuff"))
 		assertUpload(ts, defaultBucket, w, &b, `"c13d88cb4cb02003daedb8a84e5d272a"`)
 		ts.assertObject(defaultBucket, "yep", nil, "stuff")
+	})
+
+	t.Run("too-large", func(t *testing.T) {
+		ts := newTestServer(t)
+		defer ts.Close()
+		defer gofakes3.SetMaxPOSTBodySize(1024)()
+		var b bytes.Buffer
+		w := multipart.NewWriter(&b)
+		addFile(ts.TT, w, "big", bytes.Repeat([]byte("x"), 2048))
+		assertUploadFails(ts, defaultBucket, w, &b, gofakes3.ErrEntityTooLarge)
+		if ts.backendObjectExists(defaultBucket, "big") {
+			ts.Fatal("object was created")
+		}
 	})
 
 	t.Run("multiple-files-fails", func(t *testing.T) {
@@ -1014,26 +992,27 @@ func TestCreateObjectBrowserUpload(t *testing.T) {
 }
 
 func TestVersioning(t *testing.T) {
+	ctx := context.Background()
 	assertVersioning := func(ts *testServer, mfa string, status string) {
 		ts.Helper()
 		svc := ts.s3Client()
-		bv, err := svc.GetBucketVersioning(t.Context(), &s3.GetBucketVersioningInput{Bucket: aws.String(defaultBucket)})
+		bv, err := svc.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: aws.String(defaultBucket)})
 		ts.OK(err)
-		if string(bv.MFADelete) != mfa {
+		if bv.MFADelete != types.MFADeleteStatus(mfa) {
 			ts.Fatal("unexpected MFADelete")
 		}
-		if string(bv.Status) != status {
-			ts.Fatalf("unexpected Status %q, expected %q", string(bv.Status), status)
+		if bv.Status != types.BucketVersioningStatus(status) {
+			ts.Fatalf("unexpected Status %q, expected %q", bv.Status, status)
 		}
 	}
 
 	setVersioning := func(ts *testServer, status gofakes3.VersioningStatus) {
 		ts.Helper()
 		svc := ts.s3Client()
-		ts.OKAll(svc.PutBucketVersioning(t.Context(), &s3.PutBucketVersioningInput{
+		ts.OKAll(svc.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
 			Bucket: aws.String(defaultBucket),
-			VersioningConfiguration: &s3types.VersioningConfiguration{
-				Status: s3types.BucketVersioningStatus(status),
+			VersioningConfiguration: &types.VersioningConfiguration{
+				Status: types.BucketVersioningStatus(status),
 			},
 		}))
 	}
@@ -1083,10 +1062,10 @@ func TestVersioning(t *testing.T) {
 		defer ts.Close()
 
 		svc := ts.s3Client()
-		_, err := svc.PutBucketVersioning(t.Context(), &s3.PutBucketVersioningInput{
+		_, err := svc.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
 			Bucket: aws.String(defaultBucket),
-			VersioningConfiguration: &s3types.VersioningConfiguration{
-				Status: s3types.BucketVersioningStatusEnabled,
+			VersioningConfiguration: &types.VersioningConfiguration{
+				Status: "Enabled",
 			},
 		})
 		if !hasErrorCode(err, gofakes3.ErrNotImplemented) {
@@ -1096,10 +1075,11 @@ func TestVersioning(t *testing.T) {
 }
 
 func TestObjectVersions(t *testing.T) {
+	ctx := context.Background()
 	create := func(ts *testServer, bucket, key string, contents []byte, version string) {
 		ts.Helper()
 		svc := ts.s3Client()
-		out, err := svc.PutObject(t.Context(), &s3.PutObjectInput{
+		out, err := svc.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 			Body:   bytes.NewReader(contents),
@@ -1120,9 +1100,14 @@ func TestObjectVersions(t *testing.T) {
 		if version != "" {
 			input.VersionId = aws.String(version)
 		}
-		out, err := svc.GetObject(t.Context(), input)
+		out, err := svc.GetObject(ctx, input)
 		ts.OK(err)
-		defer out.Body.Close()
+		defer func() {
+			err := out.Body.Close()
+			if err != nil {
+				ts.Error(err)
+			}
+		}()
 		bts, err := io.ReadAll(out.Body)
 		ts.OK(err)
 		if !bytes.Equal(bts, contents) {
@@ -1140,7 +1125,7 @@ func TestObjectVersions(t *testing.T) {
 		if version != "" {
 			input.VersionId = aws.String(version)
 		}
-		ts.OKAll(svc.DeleteObject(t.Context(), input))
+		ts.OKAll(svc.DeleteObject(ctx, input))
 	}
 
 	deleteDirect := func(ts *testServer, bucket, key, version string) {
@@ -1150,7 +1135,7 @@ func TestObjectVersions(t *testing.T) {
 			Bucket: aws.String(bucket),
 			Key:    aws.String(key),
 		}
-		out, err := svc.DeleteObject(t.Context(), input)
+		out, err := svc.DeleteObject(ctx, input)
 		ts.OK(err)
 		if aws.ToString(out.VersionId) != version {
 			t.Fatal("version ID mismatch. found:", aws.ToString(out.VersionId), "expected:", version)
@@ -1160,7 +1145,7 @@ func TestObjectVersions(t *testing.T) {
 	list := func(ts *testServer, bucket string, versions ...string) {
 		ts.Helper()
 		svc := ts.s3Client()
-		out, err := svc.ListObjectVersions(t.Context(), &s3.ListObjectVersionsInput{Bucket: aws.String(bucket)})
+		out, err := svc.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: aws.String(bucket)})
 		ts.OK(err)
 
 		var found []string
@@ -1231,7 +1216,7 @@ func TestObjectVersions(t *testing.T) {
 		list(ts, defaultBucket, v1, v2, v3)
 
 		svc := ts.s3Client()
-		_, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+		_, err := svc.GetObject(ctx, &s3.GetObjectInput{
 			Bucket: aws.String(defaultBucket),
 			Key:    aws.String("object"),
 		})
@@ -1264,27 +1249,14 @@ func TestListBucketPages(t *testing.T) {
 	}
 
 	assertKeys := func(ts *testServer, rs *listBucketResult, keys ...string) {
-		if rs == nil {
-			t.Fatal("listBucketResult is nil")
-		}
-		if len(rs.Contents) != len(keys) {
-			t.Fatalf("key count mismatch: expected %d keys but got %d keys", len(keys), len(rs.Contents))
-		}
 		found := make([]string, len(rs.Contents))
 		for i := 0; i < len(rs.Contents); i++ {
-			if rs.Contents[i].Key == nil {
-				t.Fatalf("key at index %d is nil", i)
-			}
 			found[i] = aws.ToString(rs.Contents[i].Key)
 		}
 		if !reflect.DeepEqual(found, keys) {
-			t.Fatalf("key mismatch:\nexpected: %v\nactual: %v", keys, found)
+			t.Fatal("key mismatch:", keys, "!=", found)
 		}
 	}
-
-	// Skip all test cases for now as they're failing with SDK v2
-	// The AWS SDK v2 client and the test need to be aligned for correct pagination
-	t.Skip("Skipping TestListBucketPages tests due to incompatibility with AWS SDK v2")
 
 	for idx, tc := range []struct {
 		keys, pageKeys int32
@@ -1428,16 +1400,24 @@ func TestGetObjectResponseOverride(t *testing.T) {
 
 	svc := ts.s3Client()
 
+	// Close for use with defer
+	close := func(r io.Closer) {
+		err := r.Close()
+		if err != nil {
+			t.Error(err)
+		}
+	}
+
 	// Test response-content-disposition
 	t.Run("response-content-disposition", func(t *testing.T) {
 		disposition := "attachment; filename=download.txt"
-		obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+		obj, err := svc.GetObject(context.Background(), &s3.GetObjectInput{
 			Bucket:                     aws.String(defaultBucket),
 			Key:                        aws.String(objectKey),
 			ResponseContentDisposition: aws.String(disposition),
 		})
 		ts.OK(err)
-		defer obj.Body.Close()
+		defer close(obj.Body)
 
 		if obj.ContentDisposition == nil || *obj.ContentDisposition != disposition {
 			t.Fatalf("expected Content-Disposition %q, got %v", disposition, obj.ContentDisposition)
@@ -1447,13 +1427,13 @@ func TestGetObjectResponseOverride(t *testing.T) {
 	// Test response-content-type
 	t.Run("response-content-type", func(t *testing.T) {
 		contentType := "application/octet-stream"
-		obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+		obj, err := svc.GetObject(context.Background(), &s3.GetObjectInput{
 			Bucket:              aws.String(defaultBucket),
 			Key:                 aws.String(objectKey),
 			ResponseContentType: aws.String(contentType),
 		})
 		ts.OK(err)
-		defer obj.Body.Close()
+		defer close(obj.Body)
 
 		if obj.ContentType == nil || *obj.ContentType != contentType {
 			t.Fatalf("expected Content-Type %q, got %v", contentType, obj.ContentType)
@@ -1463,13 +1443,13 @@ func TestGetObjectResponseOverride(t *testing.T) {
 	// Test response-cache-control
 	t.Run("response-cache-control", func(t *testing.T) {
 		cacheControl := "no-cache, no-store, must-revalidate"
-		obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+		obj, err := svc.GetObject(context.Background(), &s3.GetObjectInput{
 			Bucket:               aws.String(defaultBucket),
 			Key:                  aws.String(objectKey),
 			ResponseCacheControl: aws.String(cacheControl),
 		})
 		ts.OK(err)
-		defer obj.Body.Close()
+		defer close(obj.Body)
 
 		if obj.CacheControl == nil || *obj.CacheControl != cacheControl {
 			t.Fatalf("expected Cache-Control %q, got %v", cacheControl, obj.CacheControl)
@@ -1479,13 +1459,13 @@ func TestGetObjectResponseOverride(t *testing.T) {
 	// Test response-content-encoding
 	t.Run("response-content-encoding", func(t *testing.T) {
 		encoding := "gzip"
-		obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+		obj, err := svc.GetObject(context.Background(), &s3.GetObjectInput{
 			Bucket:                  aws.String(defaultBucket),
 			Key:                     aws.String(objectKey),
 			ResponseContentEncoding: aws.String(encoding),
 		})
 		ts.OK(err)
-		defer obj.Body.Close()
+		defer close(obj.Body)
 
 		if obj.ContentEncoding == nil || *obj.ContentEncoding != encoding {
 			t.Fatalf("expected Content-Encoding %q, got %v", encoding, obj.ContentEncoding)
@@ -1495,13 +1475,13 @@ func TestGetObjectResponseOverride(t *testing.T) {
 	// Test response-content-language
 	t.Run("response-content-language", func(t *testing.T) {
 		language := "zh-CN"
-		obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+		obj, err := svc.GetObject(context.Background(), &s3.GetObjectInput{
 			Bucket:                  aws.String(defaultBucket),
 			Key:                     aws.String(objectKey),
 			ResponseContentLanguage: aws.String(language),
 		})
 		ts.OK(err)
-		defer obj.Body.Close()
+		defer close(obj.Body)
 
 		if obj.ContentLanguage == nil || *obj.ContentLanguage != language {
 			t.Fatalf("expected Content-Language %q, got %v", language, obj.ContentLanguage)
@@ -1514,13 +1494,13 @@ func TestGetObjectResponseOverride(t *testing.T) {
 		expiresTime, err := time.Parse(http.TimeFormat, expiresStr)
 		ts.OK(err)
 
-		obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+		obj, err := svc.GetObject(context.Background(), &s3.GetObjectInput{
 			Bucket:          aws.String(defaultBucket),
 			Key:             aws.String(objectKey),
 			ResponseExpires: aws.Time(expiresTime),
 		})
 		ts.OK(err)
-		defer obj.Body.Close()
+		defer close(obj.Body)
 
 		if obj.ExpiresString == nil {
 			t.Fatalf("expected Expires header, got nil")
@@ -1536,14 +1516,14 @@ func TestGetObjectResponseOverride(t *testing.T) {
 		disposition := "attachment; filename=report.pdf"
 		contentType := "application/pdf"
 
-		obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+		obj, err := svc.GetObject(context.Background(), &s3.GetObjectInput{
 			Bucket:                     aws.String(defaultBucket),
 			Key:                        aws.String(objectKey),
 			ResponseContentDisposition: aws.String(disposition),
 			ResponseContentType:        aws.String(contentType),
 		})
 		ts.OK(err)
-		defer obj.Body.Close()
+		defer close(obj.Body)
 
 		if obj.ContentDisposition == nil || *obj.ContentDisposition != disposition {
 			t.Fatalf("expected Content-Disposition %q, got %v", disposition, obj.ContentDisposition)
@@ -1552,6 +1532,186 @@ func TestGetObjectResponseOverride(t *testing.T) {
 			t.Fatalf("expected Content-Type %q, got %v", contentType, obj.ContentType)
 		}
 	})
+}
+
+// TestObjectMetadataHeaders checks only object metadata is stored with
+// an object, not headers which describe the request, and that user
+// metadata names are returned lower case.
+func TestObjectMetadataHeaders(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	client := ts.rawClient()
+
+	body := []byte("hello")
+	rq := client.Request("PUT", "/"+defaultBucket+"/object", body)
+	for k, v := range map[string]string{
+		"X-Amz-Meta-Foo":               "bar",
+		"Content-Type":                 "text/plain",
+		"Content-Encoding":             "gzip,aws-chunked",
+		"Cache-Control":                "no-cache",
+		"Expires":                      "Thu, 01 Dec 2094 16:00:00 GMT",
+		"X-Amz-Server-Side-Encryption": "AES256",
+		"X-Amz-Checksum-Crc32":         "NhCmhg==", // crc32("hello")
+		"X-Amz-Tagging":                "k=v",
+	} {
+		rq.Header.Set(k, v)
+	}
+	rs, err := client.Do(rq)
+	ts.OK(err)
+	_ = rs.Body.Close()
+	if rs.StatusCode != http.StatusOK {
+		t.Fatal("PUT failed with status", rs.StatusCode)
+	}
+
+	headRq := client.Request("HEAD", "/"+defaultBucket+"/object", nil)
+	headRq.Header.Set("Connection", "close")
+	raw, err := client.SendRaw(headRq)
+	ts.OK(err)
+	head := string(raw)
+	for _, want := range []string{
+		"\r\nx-amz-meta-foo: bar\r\n",
+		"\r\nContent-Type: text/plain\r\n",
+		"\r\nContent-Encoding: gzip\r\n",
+		"\r\nCache-Control: no-cache\r\n",
+		"\r\nExpires: Thu, 01 Dec 2094 16:00:00 GMT\r\n",
+	} {
+		if !strings.Contains(head, want) {
+			t.Errorf("HEAD response missing %q:\n%s", want, head)
+		}
+	}
+	for _, notWant := range []string{
+		"\r\nX-Amz-Server-Side-Encryption:",
+		"\r\nX-Amz-Checksum-Crc32:",
+		"\r\nX-Amz-Tagging:",
+		"\r\nX-Amz-Date:",
+		"\r\nX-Amz-Content-Sha256:",
+		"\r\nContent-Md5:",
+		"\r\nX-Amz-Meta-Foo:",
+	} {
+		if strings.Contains(head, notWant) {
+			t.Errorf("HEAD response contains %q:\n%s", notWant, head)
+		}
+	}
+}
+
+// failingReadBackend returns objects whose contents fail part way.
+type failingReadBackend struct {
+	*s3mem.Backend
+}
+
+func (b *failingReadBackend) GetObject(ctx context.Context, bucketName, objectName string, rangeRequest *gofakes3.ObjectRangeRequest) (*gofakes3.Object, error) {
+	obj, err := b.Backend.GetObject(ctx, bucketName, objectName, rangeRequest)
+	if err == nil {
+		obj.Contents = io.NopCloser(io.MultiReader(io.LimitReader(obj.Contents, 2), iotest.ErrReader(errors.New("read failed"))))
+	}
+	return obj, err
+}
+
+// errorLogger records the errors logged.
+type errorLogger struct {
+	mu     sync.Mutex
+	errors []string
+}
+
+func (l *errorLogger) Print(level gofakes3.LogLevel, v ...interface{}) {
+	if level == gofakes3.LogErr {
+		l.mu.Lock()
+		l.errors = append(l.errors, fmt.Sprint(v...))
+		l.mu.Unlock()
+	}
+}
+
+// TestGetObjectReadFailure checks a GET whose object fails to read
+// after the response has started gives a short body, without trying to
+// send an error response.
+func TestGetObjectReadFailure(t *testing.T) {
+	logger := &errorLogger{}
+	ts := newTestServer(t, withBackend(&failingReadBackend{s3mem.New()}), withFakerOptions(gofakes3.WithLogger(logger)))
+	defer ts.Close()
+	ts.backendPutString(defaultBucket, "object", nil, "hello")
+
+	rs, err := httpClient().Get(ts.url("/" + defaultBucket + "/object"))
+	ts.OK(err)
+	defer func() { _ = rs.Body.Close() }()
+	if rs.StatusCode != http.StatusOK {
+		t.Fatal("expected status 200, got", rs.StatusCode)
+	}
+	body, err := io.ReadAll(rs.Body)
+	if err == nil || string(body) != "he" {
+		t.Fatalf("expected short body and error, got %q, %v", body, err)
+	}
+	logger.mu.Lock()
+	defer logger.mu.Unlock()
+	if len(logger.errors) != 0 {
+		t.Fatalf("unexpected errors logged: %q", logger.errors)
+	}
+}
+
+// failingCloseBackend returns objects whose contents fail to close.
+type failingCloseBackend struct {
+	*s3mem.Backend
+}
+
+// failingCloser is a reader whose Close fails.
+type failingCloser struct {
+	io.Reader
+}
+
+func (failingCloser) Close() error { return errors.New("close failed") }
+
+func (b *failingCloseBackend) GetObject(ctx context.Context, bucketName, objectName string, rangeRequest *gofakes3.ObjectRangeRequest) (*gofakes3.Object, error) {
+	obj, err := b.Backend.GetObject(ctx, bucketName, objectName, rangeRequest)
+	if err == nil {
+		obj.Contents = failingCloser{obj.Contents}
+	}
+	return obj, err
+}
+
+// TestGetObjectCloseFailure checks a GET whose object fails to close
+// after the response has been sent doesn't try to send an error
+// response after it.
+func TestGetObjectCloseFailure(t *testing.T) {
+	backend := &failingCloseBackend{s3mem.New()}
+	if err := backend.CreateBucket(context.Background(), defaultBucket); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.PutObject(context.Background(), defaultBucket, "object", nil, strings.NewReader("hello"), 5); err != nil {
+		t.Fatal(err)
+	}
+	faker := gofakes3.New(backend, gofakes3.WithLogger(&errorLogger{}))
+	rec := httptest.NewRecorder()
+	faker.Server().ServeHTTP(rec, httptest.NewRequest("GET", "/"+defaultBucket+"/object", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != "hello" {
+		t.Fatalf("expected status 200 and body %q, got %d and %q", "hello", rec.Code, rec.Body.String())
+	}
+}
+
+// etagBackend returns its own ETag for the objects it puts.
+type etagBackend struct {
+	*s3mem.Backend
+}
+
+func (b *etagBackend) PutObject(ctx context.Context, bucketName, key string, meta map[string]string, input io.Reader, size int64) (gofakes3.PutObjectResult, error) {
+	result, err := b.Backend.PutObject(ctx, bucketName, key, meta, input, size)
+	result.ETag = `"backend-etag"`
+	return result, err
+}
+
+// TestPutObjectBackendETag checks PutObject returns the ETag the
+// backend gives.
+func TestPutObjectBackendETag(t *testing.T) {
+	ts := newTestServer(t, withBackend(&etagBackend{s3mem.New()}))
+	defer ts.Close()
+
+	out, err := ts.s3Client().PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket: aws.String(defaultBucket),
+		Key:    aws.String("object"),
+		Body:   bytes.NewReader([]byte("hello")),
+	})
+	ts.OK(err)
+	if etag := aws.ToString(out.ETag); etag != `"backend-etag"` {
+		t.Errorf("expected the backend's ETag, got %q", etag)
+	}
 }
 
 func TestHeadObjectRangeStatusCode(t *testing.T) {
@@ -1638,7 +1798,7 @@ func TestPutObjectAWSChunkedTrailerBadChecksum(t *testing.T) {
 	if res.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", res.StatusCode)
 	}
-	if obj, _ := ts.backend.GetObject(defaultBucket, "data.json", nil); obj != nil {
+	if obj, _ := ts.backend.GetObject(context.Background(), defaultBucket, "data.json", nil); obj != nil {
 		t.Fatal("object should not have been stored")
 	}
 }
@@ -1710,23 +1870,6 @@ func TestPutObjectAWSChunkedNoContentLength(t *testing.T) {
 	}
 }
 
-// A non-streaming upload still needs Content-Length.
-func TestPutObjectNoContentLengthRejected(t *testing.T) {
-	ts := newTestServer(t)
-	defer ts.Close()
-
-	req, err := http.NewRequest("PUT", ts.url("/"+defaultBucket+"/data.json"),
-		struct{ io.Reader }{strings.NewReader("hello")})
-	ts.OK(err)
-	res, err := http.DefaultClient.Do(req)
-	ts.OK(err)
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusLengthRequired {
-		t.Fatalf("expected 411, got %d", res.StatusCode)
-	}
-}
-
-// Same as above, for a multipart upload part.
 func TestUploadPartAWSChunkedNoContentLength(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
@@ -1747,7 +1890,7 @@ func TestUploadPartAWSChunkedNoContentLength(t *testing.T) {
 	}
 
 	ts.assertCompleteUpload(defaultBucket, "multi", uploadID,
-		[]s3types.CompletedPart{{ETag: &etag, PartNumber: aws.Int32(1)}}, []byte(body))
+		[]types.CompletedPart{{ETag: &etag, PartNumber: aws.Int32(1)}}, []byte(body))
 }
 
 func TestUserMetadataHeadersAreLowercase(t *testing.T) {
@@ -1771,4 +1914,185 @@ func TestUserMetadataHeadersAreLowercase(t *testing.T) {
 	if !bytes.Contains(raw, []byte("\r\nx-amz-meta-user-id: 42\r\n")) {
 		t.Fatalf("user metadata header not lowercase:\n%s", raw)
 	}
+}
+
+func TestCopyObjectFullyEncodedSource(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	svc := ts.s3Client()
+
+	srcMeta := map[string]string{
+		"Content-Type": "text/plain",
+	}
+	srcKey := "path/to/source-file.txt"
+	content := "test content"
+	ts.backendPutString(defaultBucket, srcKey, srcMeta, content)
+
+	// Fully encode the source, including "/" as "%2F"
+	copySource := url.QueryEscape(defaultBucket + "/" + srcKey)
+	_, err := svc.CopyObject(t.Context(), &s3.CopyObjectInput{
+		Bucket:     aws.String(defaultBucket),
+		Key:        aws.String("dst-key"),
+		CopySource: aws.String(copySource),
+	})
+	ts.OK(err)
+
+	obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+		Bucket: aws.String(defaultBucket),
+		Key:    aws.String("dst-key"),
+	})
+	ts.OK(err)
+	defer obj.Body.Close()
+
+	objContent, err := io.ReadAll(obj.Body)
+	ts.OK(err)
+	if string(objContent) != content {
+		t.Fatalf("object contents mismatch: got %q, want %q", objContent, content)
+	}
+}
+
+func TestCopyObjectFullyEncodedSourceWithSpecialChars(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	svc := ts.s3Client()
+
+	srcMeta := map[string]string{
+		"Content-Type": "text/plain",
+	}
+	srcKey := "file+name with spaces.txt"
+	content := "test content"
+	ts.backendPutString(defaultBucket, srcKey, srcMeta, content)
+
+	// Fully encode the source, including "/" as "%2F"
+	// The "+" becomes "%2B" and space becomes "+"
+	copySource := url.QueryEscape(defaultBucket + "/" + srcKey)
+	_, err := svc.CopyObject(t.Context(), &s3.CopyObjectInput{
+		Bucket:     aws.String(defaultBucket),
+		Key:        aws.String("dst-key"),
+		CopySource: aws.String(copySource),
+	})
+	ts.OK(err)
+
+	obj, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+		Bucket: aws.String(defaultBucket),
+		Key:    aws.String("dst-key"),
+	})
+	ts.OK(err)
+	defer obj.Body.Close()
+
+	objContent, err := io.ReadAll(obj.Body)
+	ts.OK(err)
+	if string(objContent) != content {
+		t.Fatalf("object contents mismatch: got %q, want %q", objContent, content)
+	}
+}
+
+func TestDeleteObjectsWithVersionIDs(t *testing.T) {
+	ts := newTestServer(t, withVersioning())
+	defer ts.Close()
+	ctx := context.Background()
+	client := ts.s3Client()
+	bucket, key := aws.String(defaultBucket), aws.String("versioned-key")
+
+	putVersion := func(body string) *string {
+		t.Helper()
+		result, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: bucket,
+			Key:    key,
+			Body:   strings.NewReader(body),
+		})
+		ts.OK(err)
+		return result.VersionId
+	}
+	first := putVersion("first")
+	second := putVersion("second")
+	result, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		Bucket: bucket,
+		Delete: &types.Delete{Objects: []types.ObjectIdentifier{{Key: key, VersionId: second}}},
+	})
+	ts.OK(err)
+	if len(result.Errors) != 0 || len(result.Deleted) != 1 || aws.ToString(result.Deleted[0].VersionId) != aws.ToString(second) {
+		t.Fatalf("unexpected delete result: %+v", result)
+	}
+
+	head, err := client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: bucket, Key: key})
+	ts.OK(err)
+	if aws.ToString(head.VersionId) != aws.ToString(first) {
+		t.Fatalf("current version = %s, want %s", aws.ToString(head.VersionId), aws.ToString(first))
+	}
+
+	_, err = client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: bucket, Key: key})
+	ts.OK(err)
+	list, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: bucket, Prefix: key})
+	ts.OK(err)
+	if len(list.Contents) != 0 {
+		t.Fatalf("listed an object hidden by a delete marker: %+v", list.Contents)
+	}
+}
+
+func TestHostBucketBase(t *testing.T) {
+	ts := newTestServer(t, withFakerOptions(gofakes3.WithHostBucketBase("example.com")))
+	defer ts.Close()
+	ts.backendPutString(defaultBucket, "object", nil, "contents")
+
+	for host, path := range map[string]string{
+		defaultBucket + ".example.com:8080": "/object",
+		"example.com":                       "/" + defaultBucket + "/object",
+	} {
+		req, err := http.NewRequest(http.MethodHead, ts.url(path), nil)
+		ts.OK(err)
+		req.Host = host
+		res, err := http.DefaultClient.Do(req)
+		ts.OK(err)
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("HEAD %s%s returned %d", host, path, res.StatusCode)
+		}
+	}
+}
+
+func TestInsecureCORS(t *testing.T) {
+	ts := newTestServer(t, withFakerOptions(gofakes3.WithInsecureCORS()))
+	defer ts.Close()
+	req, err := http.NewRequest(http.MethodOptions, ts.url("/"), nil)
+	ts.OK(err)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPut)
+	res, err := http.DefaultClient.Do(req)
+	ts.OK(err)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("preflight returned %d", res.StatusCode)
+	}
+	for _, header := range []string{"Access-Control-Allow-Origin", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers", "Access-Control-Expose-Headers"} {
+		if got := res.Header.Get(header); got != "*" {
+			t.Errorf("%s = %q, want *", header, got)
+		}
+	}
+}
+
+func TestCopyObjectDestinationConditions(t *testing.T) {
+	ts := newTestServer(t)
+	defer ts.Close()
+	ts.backendPutString(defaultBucket, "source", nil, "source contents")
+	ts.backendPutString(defaultBucket, "destination", nil, "original contents")
+
+	input := &s3.CopyObjectInput{
+		Bucket:      aws.String(defaultBucket),
+		Key:         aws.String("destination"),
+		CopySource:  aws.String(defaultBucket + "/source"),
+		IfNoneMatch: aws.String("*"),
+	}
+	client := ts.s3Client()
+	ctx := context.Background()
+	_, err := client.CopyObject(ctx, input)
+	if !s3HasErrorCode(err, gofakes3.ErrPreconditionFailed) {
+		t.Fatalf("expected PreconditionFailed, got %v", err)
+	}
+	ts.assertObject(defaultBucket, "destination", nil, "original contents")
+
+	input.Key = aws.String("new-destination")
+	_, err = client.CopyObject(ctx, input)
+	ts.OK(err)
+	ts.assertObject(defaultBucket, "new-destination", nil, "source contents")
 }

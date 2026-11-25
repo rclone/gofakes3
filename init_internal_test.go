@@ -4,7 +4,7 @@ package gofakes3
 // tests that use struct internals, etc go in this package.
 
 import (
-	"io/ioutil"
+	"io"
 	"log"
 	"testing"
 )
@@ -32,5 +32,5 @@ func (t TT) OKAll(vs ...interface{}) {
 func init() {
 	// Tests that may cause log output that merits inspection belong in
 	// gofakes3_test.
-	log.SetOutput(ioutil.Discard)
+	log.SetOutput(io.Discard)
 }

@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+type awsError interface {
+	// Returns the short phrase depicting the classification of the error.
+	Code() string
+}
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)

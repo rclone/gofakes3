@@ -19,11 +19,8 @@ func prefixFromQuery(query url.Values) Prefix {
 		Prefix:    query.Get("prefix"),
 		Delimiter: query.Get("delimiter"),
 	}
-	_, prefix.HasPrefix = query["prefix"]
-	_, prefix.HasDelimiter = query["delimiter"]
-
-	prefix.HasPrefix = prefix.HasPrefix && prefix.Prefix != ""
-	prefix.HasDelimiter = prefix.HasDelimiter && prefix.Delimiter != ""
+	prefix.HasPrefix = prefix.Prefix != ""
+	prefix.HasDelimiter = prefix.Delimiter != ""
 	return prefix
 }
 
@@ -54,7 +51,7 @@ func NewFolderPrefix(prefix string) (p Prefix) {
 //	/foo/bar   : path: /foo      remaining: "bar"
 func (p Prefix) FilePrefix() (path, remaining string, ok bool) {
 	if !p.HasPrefix || !p.HasDelimiter || p.Delimiter != "/" {
-		return "", "", p.Delimiter == "/"
+		return "", "", ok
 	}
 
 	idx := strings.LastIndexByte(p.Prefix, '/')

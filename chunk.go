@@ -2,15 +2,11 @@ package gofakes3
 
 import (
 	"bufio"
-	"crypto/sha1"
-	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"hash"
-	"hash/crc32"
-	"hash/crc64"
 	"io"
-	"math/bits"
+	"net/textproto"
 	"strings"
 )
 
@@ -40,6 +36,7 @@ var errChunkHeader = errors.New("expected integer")
 type chunkedReader struct {
 	inner       *bufio.Reader
 	chunkRemain int
+	remaining   int64
 	started     bool
 	done        bool
 	err         error
@@ -49,51 +46,25 @@ type chunkedReader struct {
 	checksums map[string]hash.Hash
 }
 
-// crc64NVMEPoly is the CRC-64/NVME polynomial as published in the NVM Express
-// NVM Command Set Specification (section 5.2.1.3.4), which S3 uses for its
-// default CRC64NVME checksum. See
-// https://reveng.sourceforge.io/crc-catalogue/17plus.htm (CRC-64/NVME).
-const crc64NVMEPoly = 0xad93d23594c93659
-
-var (
-	crc64NVMETable = crc64.MakeTable(bits.Reverse64(crc64NVMEPoly))
-	crc32cTable    = crc32.MakeTable(crc32.Castagnoli)
-)
-
-func newChecksumHash(trailerName string) hash.Hash {
-	switch trailerName {
-	case "x-amz-checksum-crc32":
-		return crc32.NewIEEE()
-	case "x-amz-checksum-crc32c":
-		return crc32.New(crc32cTable)
-	case "x-amz-checksum-crc64nvme":
-		return crc64.New(crc64NVMETable)
-	case "x-amz-checksum-sha1":
-		return sha1.New()
-	case "x-amz-checksum-sha256":
-		return sha256.New()
-	}
-	return nil
-}
-
 // verifyTrailer enables checking of the checksum trailers named in the value
 // of the X-Amz-Trailer header (comma separated). Names that are not a
 // supported checksum, such as x-amz-trailer-signature, are ignored.
 func (r *chunkedReader) verifyTrailer(trailerHeader string) *chunkedReader {
 	for _, name := range strings.Split(trailerHeader, ",") {
 		name = strings.ToLower(strings.TrimSpace(name))
-		if h := newChecksumHash(name); h != nil {
+		suffix, ok := strings.CutPrefix(textproto.CanonicalMIMEHeaderKey(name), checksumHeaderPrefix)
+		if newHash := checksumAlgorithms[strings.ToLower(suffix)]; ok && newHash != nil {
 			if r.checksums == nil {
 				r.checksums = map[string]hash.Hash{}
 			}
-			r.checksums[name] = h
+			r.checksums[name] = newHash()
 		}
 	}
 	return r
 }
 
 func newChunkedReader(inner io.Reader) *chunkedReader {
-	return &chunkedReader{inner: bufio.NewReader(inner)}
+	return &chunkedReader{inner: bufio.NewReader(inner), remaining: -1}
 }
 
 func (r *chunkedReader) Read(p []byte) (n int, err error) {
@@ -124,6 +95,9 @@ func (r *chunkedReader) read(p []byte) (n int, err error) {
 			r.chunkRemain -= innerN
 			n += innerN
 			if err != nil {
+				if err == io.EOF {
+					err = io.ErrUnexpectedEOF
+				}
 				return n, err
 			}
 			continue
@@ -140,6 +114,12 @@ func (r *chunkedReader) read(p []byte) (n int, err error) {
 		size, err := r.readChunkHeader()
 		if err != nil {
 			return n, err
+		}
+		if r.remaining >= 0 {
+			if int64(size) > r.remaining || (size == 0 && r.remaining != 0) {
+				return n, ErrIncompleteBody
+			}
+			r.remaining -= int64(size)
 		}
 		if size == 0 {
 			if err := r.skipTrailers(); err != nil {
@@ -179,7 +159,7 @@ func (r *chunkedReader) readChunkHeader() (int, error) {
 			}
 
 			// skip the rest of the line (extensions) and the CRLF that terminates the chunk header
-			if _, err := r.inner.ReadString('\n'); err != nil {
+			if _, err := r.inner.ReadSlice('\n'); err != nil {
 				return 0, err
 			}
 			return size, nil
@@ -198,20 +178,20 @@ func (r *chunkedReader) readChunkHeader() (int, error) {
 // x-amz-checksum-crc32, x-amz-trailer-signature) up to the blank line.
 func (r *chunkedReader) skipTrailers() error {
 	for {
-		line, err := r.inner.ReadString('\n')
-		if cerr := r.checkTrailerLine(line); cerr != nil {
+		line, err := r.inner.ReadSlice('\n')
+		if cerr := r.checkTrailerLine(string(line)); cerr != nil {
 			return cerr
 		}
-		if len(line) <= 2 { // "\r\n", "\n" or empty
+		if len(line) <= 2 || err == io.EOF {
+			if len(r.checksums) != 0 {
+				return ErrorMessage(ErrInvalidRequest, "A checksum announced in X-Amz-Trailer is missing.")
+			}
 			if err == io.EOF {
 				return nil
 			}
 			return err
 		}
 		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
 			return err
 		}
 	}
@@ -224,12 +204,14 @@ func (r *chunkedReader) checkTrailerLine(trailer string) error {
 	if !ok {
 		return nil
 	}
-	h, ok := r.checksums[strings.ToLower(strings.TrimSpace(name))]
+	name = strings.ToLower(strings.TrimSpace(name))
+	h, ok := r.checksums[name]
 	if !ok {
 		return nil
 	}
 	if base64.StdEncoding.EncodeToString(h.Sum(nil)) != strings.TrimSpace(value) {
 		return ErrBadDigest
 	}
+	delete(r.checksums, name)
 	return nil
 }

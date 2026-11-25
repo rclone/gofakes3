@@ -46,9 +46,3 @@ func ValidateBucketName(name string) error {
 
 	return nil
 }
-
-var etagPattern = regexp.MustCompile(`^"[a-z0-9]+"$`)
-
-func validETag(v string) bool {
-	return etagPattern.MatchString(v)
-}

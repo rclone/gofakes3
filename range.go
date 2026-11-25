@@ -11,10 +11,15 @@ type ObjectRange struct {
 	Start, Length int64
 }
 
+// writeHeader writes the Content-Length and, for a range, the
+// Content-Range headers of a GET of an object of size sz, and the
+// 206 Partial Content status for a range. It must be the last header
+// written.
 func (o *ObjectRange) writeHeader(sz int64, w http.ResponseWriter) {
 	if o != nil {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", o.Start, o.Start+o.Length-1, sz))
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", o.Length))
+		w.WriteHeader(http.StatusPartialContent)
 	} else {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", sz))
 	}

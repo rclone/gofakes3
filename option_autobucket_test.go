@@ -2,12 +2,13 @@ package gofakes3_test
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/johannesboyne/gofakes3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/rclone/gofakes3"
 )
 
 const autoBucket = "autobucket"
@@ -20,11 +21,12 @@ func newAutoBucketTestServer(t *testing.T) *testServer {
 }
 
 func TestAutoBucketPutObject(t *testing.T) {
+	ctx := context.Background()
 	autoSrv := newAutoBucketTestServer(t)
 	defer autoSrv.Close()
 	svc := autoSrv.s3Client()
 
-	_, err := svc.PutObject(t.Context(), &s3.PutObjectInput{
+	_, err := svc.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(autoBucket),
 		Key:    aws.String("object"),
 		Body:   bytes.NewReader([]byte("hello")),
@@ -36,11 +38,12 @@ func TestAutoBucketPutObject(t *testing.T) {
 }
 
 func TestAutoBucketGetObject(t *testing.T) {
+	ctx := context.Background()
 	ts := newAutoBucketTestServer(t)
 	defer ts.Close()
 	svc := ts.s3Client()
 
-	_, err := svc.GetObject(t.Context(), &s3.GetObjectInput{
+	_, err := svc.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(autoBucket),
 		Key:    aws.String("object"),
 	})
@@ -50,11 +53,12 @@ func TestAutoBucketGetObject(t *testing.T) {
 }
 
 func TestAutoBucketDeleteObject(t *testing.T) {
+	ctx := context.Background()
 	ts := newAutoBucketTestServer(t)
 	defer ts.Close()
 	svc := ts.s3Client()
 
-	_, err := svc.DeleteObject(t.Context(), &s3.DeleteObjectInput{
+	_, err := svc.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(autoBucket),
 		Key:    aws.String("object"),
 	})
@@ -64,11 +68,12 @@ func TestAutoBucketDeleteObject(t *testing.T) {
 }
 
 func TestAutoBucketGetBucketLocation(t *testing.T) {
+	ctx := context.Background()
 	autoSrv := newAutoBucketTestServer(t)
 	defer autoSrv.Close()
 	svc := autoSrv.s3Client()
 
-	_, err := svc.GetBucketLocation(t.Context(), &s3.GetBucketLocationInput{
+	_, err := svc.GetBucketLocation(ctx, &s3.GetBucketLocationInput{
 		Bucket: aws.String(autoBucket),
 	})
 	if err != nil {
@@ -77,11 +82,12 @@ func TestAutoBucketGetBucketLocation(t *testing.T) {
 }
 
 func TestAutoBucketDeleteObjectVersion(t *testing.T) {
+	ctx := context.Background()
 	ts := newAutoBucketTestServer(t)
 	defer ts.Close()
 	svc := ts.s3Client()
 
-	_, err := svc.DeleteObject(t.Context(), &s3.DeleteObjectInput{
+	_, err := svc.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket:    aws.String(autoBucket),
 		Key:       aws.String("object"),
 		VersionId: aws.String("version"),
@@ -92,13 +98,14 @@ func TestAutoBucketDeleteObjectVersion(t *testing.T) {
 }
 
 func TestAutoBucketDeleteObjectsVersion(t *testing.T) {
+	ctx := context.Background()
 	ts := newAutoBucketTestServer(t)
 	defer ts.Close()
 	svc := ts.s3Client()
 
-	_, err := svc.DeleteObjects(t.Context(), &s3.DeleteObjectsInput{
-		Delete: &s3types.Delete{
-			Objects: []s3types.ObjectIdentifier{
+	_, err := svc.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		Delete: &types.Delete{
+			Objects: []types.ObjectIdentifier{
 				{Key: aws.String("object1"), VersionId: aws.String("version1")},
 				{Key: aws.String("object2"), VersionId: aws.String("version2")},
 			},
@@ -111,11 +118,12 @@ func TestAutoBucketDeleteObjectsVersion(t *testing.T) {
 }
 
 func TestAutoBucketListMultipartUploads(t *testing.T) {
+	ctx := context.Background()
 	ts := newAutoBucketTestServer(t)
 	defer ts.Close()
 	svc := ts.s3Client()
 
-	_, err := svc.ListMultipartUploads(t.Context(), &s3.ListMultipartUploadsInput{
+	_, err := svc.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{
 		Bucket: aws.String(autoBucket),
 	})
 	if !hasErrorCode(err, gofakes3.ErrNoSuchUpload) {
@@ -124,11 +132,12 @@ func TestAutoBucketListMultipartUploads(t *testing.T) {
 }
 
 func TestAutoBucketGetBucketVersioning(t *testing.T) {
+	ctx := context.Background()
 	ts := newAutoBucketTestServer(t)
 	defer ts.Close()
 	svc := ts.s3Client()
 
-	_, err := svc.GetBucketVersioning(t.Context(), &s3.GetBucketVersioningInput{
+	_, err := svc.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{
 		Bucket: aws.String(autoBucket),
 	})
 	if err != nil {

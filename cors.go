@@ -10,9 +10,8 @@ var (
 		"Accept",
 		"Accept-Encoding",
 		"Authorization",
-		"cache-control",
+		"Cache-Control",
 		"Content-Disposition",
-		"Content-Encoding",
 		"Content-Length",
 		"Content-Type",
 		"X-Amz-Date",
@@ -25,61 +24,43 @@ var (
 		"x-amz-meta-private",
 		"x-amz-meta-to",
 		"x-amz-security-token",
-		"x-requested-with",
+		"X-Requested-With",
 	}
 	corsHeadersString = strings.Join(corsHeaders, ", ")
 )
 
+// withCORS adds the CORS headers to responses and answers CORS
+// preflight (OPTIONS) requests.
+//
+// Browsers don't authenticate preflight requests, so this must be
+// outside the authentication.
 type withCORS struct {
-	handler http.Handler
-
-	methods string
-	origin  string
-	headers string
-	expose  string
-}
-
-func wrapCORS(handler http.Handler) http.Handler {
-	return &withCORS{
-		handler: handler,
-		methods: "POST, GET, OPTIONS, PUT, DELETE, HEAD",
-		origin:  "*",
-		headers: corsHeadersString,
-		expose:  "ETag",
-	}
-}
-
-func wrapInsecureCORS(handler http.Handler) http.Handler {
-	return &withCORS{
-		handler: handler,
-		methods: "*",
-		origin:  "*",
-		headers: "*",
-		expose:  "*",
-	}
+	r http.Handler
+	g *GoFakeS3
 }
 
 func (s *withCORS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	isPreflight := r.Method == "OPTIONS" &&
-		r.Header.Get("Access-Control-Request-Method") != "" &&
-		r.Header.Get("Origin") != ""
-
-	if s.origin != "" {
-		w.Header().Set("Access-Control-Allow-Origin", s.origin)
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if s.g.insecureCORS {
+		if r.Method == http.MethodOptions && r.Header.Get("Origin") != "" && r.Header.Get("Access-Control-Request-Method") != "" {
+			w.Header().Set("Access-Control-Allow-Methods", "*")
+			w.Header().Set("Access-Control-Allow-Headers", "*")
+			w.Header().Set("Access-Control-Expose-Headers", "*")
+			return
+		}
+		s.r.ServeHTTP(w, r)
+		return
 	}
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE, HEAD")
+	w.Header().Set("Access-Control-Allow-Headers", corsHeadersString)
+	w.Header().Set("Access-Control-Expose-Headers", "ETag")
 
-	if isPreflight {
-		if s.methods != "" {
-			w.Header().Set("Access-Control-Allow-Methods", s.methods)
-		}
-		if s.headers != "" {
-			w.Header().Set("Access-Control-Allow-Headers", s.headers)
-		}
-		if s.expose != "" {
-			w.Header().Set("Access-Control-Expose-Headers", s.expose)
+	if r.Method == "OPTIONS" {
+		if r.Header.Get("Origin") == "" || r.Header.Get("Access-Control-Request-Method") == "" {
+			s.g.httpError(w, r, ErrorMessage(ErrBadRequest, "Insufficient information. Origin request header needed."))
 		}
 		return
 	}
 
-	s.handler.ServeHTTP(w, r)
+	s.r.ServeHTTP(w, r)
 }

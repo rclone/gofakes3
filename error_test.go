@@ -1,9 +1,11 @@
 package gofakes3
 
 import (
-	"encoding/xml"
+	"net/http"
 	"testing"
 	"time"
+
+	xml "github.com/minio/xxml"
 )
 
 func TestErrorCustomResponseMarshalsAsExpected(t *testing.T) {
@@ -24,5 +26,11 @@ func TestErrorCustomResponseMarshalsAsExpected(t *testing.T) {
 
 	if string(out) != expected {
 		t.Fatalf("expected:\n%s\nfound:\n%s", expected, out)
+	}
+}
+
+func TestErrSlowDownStatus(t *testing.T) {
+	if status := ErrSlowDown.Status(); status != http.StatusServiceUnavailable {
+		t.Fatal("status", status, "!=", http.StatusServiceUnavailable)
 	}
 }

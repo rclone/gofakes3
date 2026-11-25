@@ -1,12 +1,13 @@
 package gofakes3
 
 import (
-	"encoding/xml"
 	"fmt"
 	"io"
 	"strings"
 	"testing"
 	"time"
+
+	xml "github.com/minio/xxml"
 )
 
 func TestObjectListAddPrefix(t *testing.T) {
@@ -41,7 +42,32 @@ func TestContentTime(t *testing.T) {
 
 	var v = testMsg{
 		Foo:  "bar",
-		Time: NewContentTime(time.Date(2019, 1, 1, 7, 0, 0, 0, time.FixedZone("EST", -5*3600))), // 7am EST = 12pm UTC
+		Time: NewContentTime(time.Date(2019, 1, 1, 12, 0, 0, 0, time.UTC)),
+	}
+	out, err := xml.Marshal(&v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != expected {
+		t.Fatalf("unexpected XML output: %s", string(out))
+	}
+}
+
+func TestContentTimeConvertsToUTC(t *testing.T) {
+	type testMsg struct {
+		Foo  string
+		Time ContentTime
+	}
+	const expected = "" +
+		"<testMsg>" +
+		"<Foo>bar</Foo>" +
+		"<Time>2019-01-01T13:00:00Z</Time>" +
+		"</testMsg>"
+
+	cst := time.FixedZone("CST", -6*3600)
+	var v = testMsg{
+		Foo:  "bar",
+		Time: NewContentTime(time.Date(2019, 1, 1, 7, 0, 0, 0, cst)),
 	}
 	out, err := xml.Marshal(&v)
 	if err != nil {
@@ -156,19 +182,32 @@ func TestCopyObjectResult(t *testing.T) {
 	}
 }
 
-func TestMultipartListResultsIncludeIsTruncatedFalse(t *testing.T) {
-	for name, res := range map[string]any{
-		"uploads": ListMultipartUploadsResult{Bucket: "bucket"},
-		"parts":   ListMultipartUploadPartsResult{Bucket: "bucket", Key: "key", UploadID: "upload"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			out, err := xml.Marshal(res)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(string(out), "<IsTruncated>false</IsTruncated>") {
-				t.Fatalf("expected IsTruncated=false in XML: %s", string(out))
-			}
-		})
+func TestListMultipartUploadPartsResultIsTruncated(t *testing.T) {
+	res := ListMultipartUploadPartsResult{
+		Bucket:      "mybucket",
+		Key:         "mykey",
+		UploadID:    "upload123",
+		IsTruncated: false,
+	}
+	out, err := xml.Marshal(&res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "<IsTruncated>false</IsTruncated>") {
+		t.Fatalf("expected <IsTruncated>false</IsTruncated> in XML, got: %s", string(out))
+	}
+}
+
+func TestListMultipartUploadsResultIsTruncated(t *testing.T) {
+	res := ListMultipartUploadsResult{
+		Bucket:      "mybucket",
+		IsTruncated: false,
+	}
+	out, err := xml.Marshal(&res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "<IsTruncated>false</IsTruncated>") {
+		t.Fatalf("expected <IsTruncated>false</IsTruncated> in XML, got: %s", string(out))
 	}
 }

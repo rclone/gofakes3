@@ -1,8 +1,16 @@
 package gofakes3
 
-import "time"
+import (
+	"context"
+	"strings"
+	"time"
+)
 
 type Option func(g *GoFakeS3)
+
+func WithV4Auth(authPair map[string]string) Option {
+	return func(g *GoFakeS3) { g.v4AuthPair = authPair }
+}
 
 // WithTimeSource allows you to substitute the behaviour of time.Now() and
 // time.Since() within GoFakeS3. This can be used to trigger time skew errors,
@@ -59,26 +67,27 @@ func WithRequestID(id uint64) Option {
 // If active, the URL 'http://mybucket.localhost/object' will be routed
 // as if the URL path was '/mybucket/object'.
 //
-// This will apply to all requests. If you want to be more specific, provide
-// WithHostBucketBase.
-//
-// See https://docs.aws.amazon.com/AmazonS3/latest/dev/UsingBucket.html for details.
+// See https://docs.aws.amazon.com/AmazonS3/latest/dev/UsingBucket.html
+// for details.
 func WithHostBucket(enabled bool) Option {
 	return func(g *GoFakeS3) { g.hostBucket = enabled }
 }
 
-// WithHostBucketBase enables or disables bucket rewriting in the router, but only if the
-// host is a subdomain of the base.
-//
-// If set to 'example.com', the URL 'http://mybucket.example.com/object' will be routed as
-// if the URL path was '/mybucket/object', but 'http://example.com/bucket/object' will use
-// path-based bucket routing instead.
-//
-// You may pass multiple bases, they are tested in order.
-//
-// See https://docs.aws.amazon.com/AmazonS3/latest/dev/UsingBucket.html for details.
+// WithHostBucketBase enables virtual-host bucket routing for subdomains of the
+// supplied hosts. Other hosts use path-style routing.
 func WithHostBucketBase(hosts ...string) Option {
-	return func(g *GoFakeS3) { g.hostBucketBases = hosts }
+	bases := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		if base := strings.Trim(host, "."); base != "" {
+			bases = append(bases, base)
+		}
+	}
+	return func(g *GoFakeS3) { g.hostBucketBases = bases }
+}
+
+// WithInsecureCORS allows all methods and headers in CORS preflight responses.
+func WithInsecureCORS() Option {
+	return func(g *GoFakeS3) { g.insecureCORS = true }
 }
 
 // WithoutVersioning disables versioning on the passed backend, if it supported it.
@@ -99,10 +108,17 @@ func WithUnimplementedPageError() Option {
 // WithAutoBucket instructs GoFakeS3 to create buckets that don't exist on first use,
 // rather than returning ErrNoSuchBucket.
 func WithAutoBucket(enabled bool) Option {
-	return func(g *GoFakeS3) { g.autoBucket = enabled }
+	return func(g *GoFakeS3) { g.autoBucket = true }
 }
 
-// WithInsecureCORS responds with * for all Access-Control-Allow headers.
-func WithInsecureCORS() Option {
-	return func(g *GoFakeS3) { g.wrapCORS = wrapInsecureCORS }
+// WithUploadOwner makes multipart uploads private to their owner, which
+// owner returns from the context of each request. To any other owner
+// an upload doesn't exist: it isn't listed and can't be added to,
+// completed or aborted.
+//
+// Use this when one instance serves users who must not see or use each
+// other's uploads, for example when the Backend maps each user to
+// different storage.
+func WithUploadOwner(owner func(ctx context.Context) string) Option {
+	return func(g *GoFakeS3) { g.uploadOwner = owner }
 }

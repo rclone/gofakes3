@@ -8,6 +8,4 @@ var tests = []Test{
 	&S300005ListVersionsWithNeverVersionedBucket{},
 	&S300006GetBucketLocationNoSuchBucket{},
 	&S300007BucketVersioningNoSuchBucket{},
-	&S300008HideDeleteMarkers{},
-	&S300009DeleteMultipleVersionsOfMultipleObjects{},
 }

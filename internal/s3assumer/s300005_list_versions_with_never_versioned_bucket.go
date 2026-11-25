@@ -41,7 +41,7 @@ func (s S300005ListVersionsWithNeverVersionedBucket) Run(ctx *Context) error {
 	for _, key := range keys {
 		for i := 0; i < 2; i++ {
 			body := ctx.RandBytes(32)
-			vrs, err := client.PutObject(ctx, &s3.PutObjectInput{
+			vrs, err := client.PutObject(ctx.Context, &s3.PutObjectInput{
 				Key:    aws.String(key),
 				Bucket: bucket,
 				Body:   bytes.NewReader(body),
@@ -54,7 +54,7 @@ func (s S300005ListVersionsWithNeverVersionedBucket) Run(ctx *Context) error {
 	}
 
 	{ // Sanity check version length
-		rs, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+		rs, err := client.ListObjectVersions(ctx.Context, &s3.ListObjectVersionsInput{
 			Bucket: bucket,
 			Prefix: aws.String(prefix),
 		})

@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"math/rand"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 type Context struct {
@@ -28,17 +30,20 @@ func (c *Context) RandBytes(sz int) []byte {
 }
 
 func (c *Context) S3Client() *s3.Client {
-	config := aws.Config{
-		BaseEndpoint: aws.String(c.config.S3Endpoint),
-		Region:       c.config.S3Region,
+	var config = aws.Config{
+		Region: c.config.S3Region,
 	}
-
 	if c.config.Verbose {
-		config.ClientLogMode = aws.LogRequestWithBody
+		config.ClientLogMode = aws.ClientLogMode(math.MaxInt64)
 	}
-
-	svc := s3.NewFromConfig(config, func(options *s3.Options) {
-		options.UsePathStyle = c.config.S3PathStyle
+	svc := s3.NewFromConfig(config, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(c.config.S3Endpoint)
+		o.UsePathStyle = c.config.S3PathStyle
+		v := aws.Credentials{
+			AccessKeyID:     "dummy-access",
+			SecretAccessKey: "dummy-secret",
+		}
+		o.Credentials = &credentials.StaticCredentialsProvider{Value: v}
 	})
 	return svc
 }
@@ -49,11 +54,12 @@ func (c *Context) EnsureVersioningEnabled(client *s3.Client, bucket string) erro
 		return err
 	}
 
-	if vers.Status != s3types.BucketVersioningStatusEnabled {
-		if _, err := client.PutBucketVersioning(context.TODO(), &s3.PutBucketVersioningInput{
+	status := vers.Status
+	if status != "Enabled" {
+		if _, err := client.PutBucketVersioning(c.Context, &s3.PutBucketVersioningInput{
 			Bucket: aws.String(bucket),
-			VersioningConfiguration: &s3types.VersioningConfiguration{
-				Status: s3types.BucketVersioningStatusEnabled,
+			VersioningConfiguration: &types.VersioningConfiguration{
+				Status: "Enabled",
 			},
 		}); err != nil {
 			return err
@@ -77,13 +83,13 @@ func (c *Context) EnsureVersioningNeverEnabled(client *s3.Client, bucket string)
 }
 
 func (c *Context) getBucketVersioning(client *s3.Client, bucket string) (*s3.GetBucketVersioningOutput, error) {
-	vers, err := client.GetBucketVersioning(context.TODO(), &s3.GetBucketVersioningInput{Bucket: aws.String(bucket)})
+	vers, err := client.GetBucketVersioning(c.Context, &s3.GetBucketVersioningInput{Bucket: aws.String(bucket)})
 	if err != nil {
 		return nil, err
 	}
 
 	status := vers.Status
-	if status != "" && status != s3types.BucketVersioningStatusEnabled && status != s3types.BucketVersioningStatusSuspended {
+	if status != "" && status != "Enabled" && status != "Suspended" {
 		return nil, fmt.Errorf("unexpected status %q", status)
 	}
 	mfaDelete := vers.MFADelete

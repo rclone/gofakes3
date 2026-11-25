@@ -36,9 +36,20 @@ const (
 	MaxBucketKeys        = 1000
 	DefaultMaxBucketKeys = 1000
 
+	// MaxBucketsLimit is the most buckets ListBuckets returns at once.
+	MaxBucketsLimit = 10000
+
 	MaxBucketVersionKeys        = 1000
 	DefaultMaxBucketVersionKeys = 1000
 
 	// From the docs: "Part numbers can be any number from 1 to 10,000, inclusive."
 	MaxUploadPartNumber = 10000
+
+	// From the docs: "The request can contain a list of up to 1,000 keys"
+	MaxDeleteObjects = 1000
+
+	// MaxXMLBodySize is the largest XML request body accepted, which is
+	// ample for the part list of a CompleteMultipartUpload with
+	// MaxUploadPartNumber parts or the key list of a DeleteObjects.
+	MaxXMLBodySize = 10 * 1024 * 1024
 )
