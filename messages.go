@@ -183,6 +183,9 @@ type InitiateMultipartUpload struct {
 	UploadID UploadID `xml:"UploadId"`
 }
 
+// InitiateMultipartUploadResult is the XML response to initiating an upload.
+type InitiateMultipartUploadResult = InitiateMultipartUpload
+
 type ListBucketResultBase struct {
 	XMLName xml.Name `xml:"ListBucketResult"`
 	Xmlns   string   `xml:"xmlns,attr"`
@@ -485,7 +488,7 @@ const (
 type ObjectID struct {
 	Key string `xml:"Key"`
 
-	// Versions not supported in GoFakeS3 yet.
+	// VersionID selects a specific object version when deleting.
 	VersionID string `xml:"VersionId,omitempty" json:"VersionId,omitempty"`
 
 	// Conditions on deleting the object in a DeleteRequest.

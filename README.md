@@ -13,5 +13,5 @@ Notable differences:
 * Use modified xml library to handle more control chars
 * Func `getVersioningConfiguration` will return empty when unversioned
 * New func in `backend` interface: `CopyObject`
-* Support authentication with AWS Signature V4 
+* Support authentication with AWS Signature V4
 * Interfaces changed to take context

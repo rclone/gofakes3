@@ -10,6 +10,7 @@ var (
 		"Accept",
 		"Accept-Encoding",
 		"Authorization",
+		"Cache-Control",
 		"Content-Disposition",
 		"Content-Length",
 		"Content-Type",
@@ -23,6 +24,7 @@ var (
 		"x-amz-meta-private",
 		"x-amz-meta-to",
 		"x-amz-security-token",
+		"X-Requested-With",
 	}
 	corsHeadersString = strings.Join(corsHeaders, ", ")
 )
@@ -39,6 +41,16 @@ type withCORS struct {
 
 func (s *withCORS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if s.g.insecureCORS {
+		if r.Method == http.MethodOptions && r.Header.Get("Origin") != "" && r.Header.Get("Access-Control-Request-Method") != "" {
+			w.Header().Set("Access-Control-Allow-Methods", "*")
+			w.Header().Set("Access-Control-Allow-Headers", "*")
+			w.Header().Set("Access-Control-Expose-Headers", "*")
+			return
+		}
+		s.r.ServeHTTP(w, r)
+		return
+	}
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE, HEAD")
 	w.Header().Set("Access-Control-Allow-Headers", corsHeadersString)
 	w.Header().Set("Access-Control-Expose-Headers", "ETag")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -99,32 +100,62 @@ func objectLastModified(obj *Object) time.Time {
 	return t
 }
 
-// writeConditions are the conditions on writing an object given in a
-// request with If-Match or If-None-Match.
-type writeConditions struct {
-	ifMatch, ifNoneMatch string
+// WriteConditions contains the validated destination ETags of a request.
+type WriteConditions struct{ match, none []string }
+
+// ParseWriteConditions parses If-Match and If-None-Match. It returns nil
+// when neither header is present.
+func ParseWriteConditions(h http.Header) (*WriteConditions, error) {
+	var c WriteConditions
+	for _, field := range []struct {
+		name string
+		tags *[]string
+	}{{"If-Match", &c.match}, {"If-None-Match", &c.none}} {
+		if values := h.Values(field.name); len(values) > 0 {
+			tags := splitEntityTags(strings.Join(values, ","))
+			if len(tags) == 0 {
+				return nil, ErrInvalidArgument
+			}
+			*field.tags = tags
+		}
+	}
+	if c.match == nil && c.none == nil {
+		return nil, nil
+	}
+	return &c, nil
 }
 
-// writeConditionsKey is the context key for the writeConditions of a
-// request.
-type writeConditionsKey struct{}
+// NeedsETag reports whether validation requires hashing an existing object.
+func (c *WriteConditions) NeedsETag() bool {
+	return len(c.match) > 0 && c.match[0] != "*" || len(c.none) > 0 && c.none[0] != "*"
+}
 
-// check checks the conditions against the current object, which
-// exists or not and if it exists has etag.
-func (c writeConditions) check(exists bool, etag string) error {
-	if c.ifMatch != "" {
+// Check validates the conditions against the destination. etag is the quoted
+// strong ETag when NeedsETag is true and the destination exists.
+func (c *WriteConditions) Check(exists bool, etag string) error {
+	if !strings.HasPrefix(etag, `"`) {
+		etag = `"` + etag + `"`
+	}
+	if len(c.match) > 0 {
 		if !exists {
 			return ErrNoSuchKey
 		}
-		if !etagMatches(c.ifMatch, etag) {
+		if c.match[0] != "*" && !slices.Contains(c.match, etag) {
 			return ErrPreconditionFailed
 		}
 	}
-	if c.ifNoneMatch != "" && exists && etagMatches(c.ifNoneMatch, etag) {
-		return ErrPreconditionFailed
+	if exists {
+		for _, tag := range c.none {
+			if tag == "*" || strings.TrimPrefix(tag, "W/") == etag {
+				return ErrPreconditionFailed
+			}
+		}
 	}
 	return nil
 }
+
+// writeConditionsKey is the context key for a request’s write conditions.
+type writeConditionsKey struct{}
 
 // CheckWriteConditions checks the If-Match and If-None-Match
 // conditions on writing an object, given in the request with ctx,
@@ -140,18 +171,18 @@ func (c writeConditions) check(exists bool, etag string) error {
 // afterwards. A backend can call this as it replaces the object, while
 // stopping other writes, to make the check atomic.
 func CheckWriteConditions(ctx context.Context, exists bool, etag string) error {
-	c, ok := ctx.Value(writeConditionsKey{}).(writeConditions)
+	c, ok := ctx.Value(writeConditionsKey{}).(*WriteConditions)
 	if !ok {
 		return nil
 	}
-	return c.check(exists, etag)
+	return c.Check(exists, etag)
 }
 
 // HasWriteConditions reports whether the request with ctx has If-Match
 // or If-None-Match conditions on writing an object, so whether
 // CheckWriteConditions needs calling.
 func HasWriteConditions(ctx context.Context) bool {
-	_, ok := ctx.Value(writeConditionsKey{}).(writeConditions)
+	_, ok := ctx.Value(writeConditionsKey{}).(*WriteConditions)
 	return ok
 }
 
@@ -161,24 +192,21 @@ func HasWriteConditions(ctx context.Context) bool {
 // If there are conditions it returns r with them in its context for
 // the backend to check with CheckWriteConditions.
 func (g *GoFakeS3) checkWriteConditions(r *http.Request, bucket, object string) (*http.Request, error) {
-	c := writeConditions{
-		ifMatch:     r.Header.Get("If-Match"),
-		ifNoneMatch: r.Header.Get("If-None-Match"),
-	}
-	if c == (writeConditions{}) {
-		return r, nil
+	c, err := ParseWriteConditions(r.Header)
+	if err != nil || c == nil {
+		return r, err
 	}
 	exists, etag := false, ""
 	obj, err := g.storage.HeadObject(r.Context(), bucket, object)
 	if err == nil {
-		exists, etag = true, hex.EncodeToString(obj.Hash)
+		exists, etag = !obj.IsDeleteMarker, hex.EncodeToString(obj.Hash)
 		if obj.Contents != nil {
 			_ = obj.Contents.Close()
 		}
 	} else if !HasErrorCode(err, ErrNoSuchKey) {
 		return r, err
 	}
-	if err := c.check(exists, etag); err != nil {
+	if err := c.Check(exists, etag); err != nil {
 		return r, err
 	}
 	return r.WithContext(context.WithValue(r.Context(), writeConditionsKey{}, c)), nil
@@ -194,12 +222,18 @@ type deleteConditions struct {
 // checkDeleteConditions checks the conditions c on deleting the object
 // at bucket/object. They are met if the object doesn't exist, as
 // deleting it does nothing.
-func (g *GoFakeS3) checkDeleteConditions(ctx context.Context, bucket, object string, c deleteConditions) error {
+func (g *GoFakeS3) checkDeleteConditions(ctx context.Context, bucket, object string, version VersionID, c deleteConditions) error {
 	if c == (deleteConditions{}) {
 		return nil
 	}
-	obj, err := g.storage.HeadObject(ctx, bucket, object)
-	if HasErrorCode(err, ErrNoSuchKey) {
+	var obj *Object
+	var err error
+	if version != "" && g.versioned != nil {
+		obj, err = g.versioned.HeadObjectVersion(bucket, object, version)
+	} else {
+		obj, err = g.storage.HeadObject(ctx, bucket, object)
+	}
+	if HasErrorCode(err, ErrNoSuchKey) || HasErrorCode(err, ErrNoSuchVersion) {
 		return nil
 	} else if err != nil {
 		return err
@@ -226,4 +260,55 @@ func (g *GoFakeS3) checkDeleteConditions(ctx context.Context, bucket, object str
 		return ErrPreconditionFailed
 	}
 	return nil
+}
+
+// splitEntityTags accepts quoted lists and single unquoted tags used by S3 clients.
+func splitEntityTags(value string) []string {
+	value = strings.Trim(value, " \t")
+	if value == "*" {
+		return []string{"*"}
+	}
+	if value != "" && value[0] != '"' && !strings.HasPrefix(value, "W/") {
+		for i := range len(value) {
+			c := value[i]
+			if c <= 0x20 || c >= 0x7f || c == '"' || c == ',' || c == '*' {
+				return nil
+			}
+		}
+		return []string{`"` + value + `"`}
+	}
+	var tags []string
+	for value != "" {
+		end := 0
+		if strings.HasPrefix(value, "W/") {
+			end = 2
+		}
+		if len(value) <= end || value[end] != '"' {
+			return nil
+		}
+		end++
+		for end < len(value) && value[end] != '"' {
+			if value[end] < 0x21 || value[end] == 0x7f {
+				return nil
+			}
+			end++
+		}
+		if end == len(value) {
+			return nil
+		}
+		end++
+		tags = append(tags, value[:end])
+		value = strings.TrimLeft(value[end:], " \t")
+		if value == "" {
+			return tags
+		}
+		if value[0] != ',' {
+			return nil
+		}
+		value = strings.TrimLeft(value[1:], " \t")
+		if value == "" {
+			return nil
+		}
+	}
+	return tags
 }

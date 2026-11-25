@@ -93,9 +93,8 @@ func (db *Backend) ListBucket(ctx context.Context, name string, prefix *gofakes3
 	var iter = goskipiter.New(storedBucket.objects.Iterator())
 	var match gofakes3.PrefixMatch
 
-	if page.Marker != "" {
-		iter.Seek(page.Marker)
-		iter.Next() // Move to the next item after the Marker
+	if page.Marker != "" && iter.Seek(page.Marker) && iter.Key() == page.Marker {
+		iter.Next()
 	}
 
 	var cnt int64 = 0
@@ -104,6 +103,9 @@ func (db *Backend) ListBucket(ctx context.Context, name string, prefix *gofakes3
 
 	for iter.Next() {
 		item := iter.Value().(*bucketObject)
+		if item.data == nil || item.data.deleteMarker {
+			continue
+		}
 
 		if !prefix.Match(item.data.name, &match) {
 			continue
@@ -161,6 +163,18 @@ func (db *Backend) DeleteBucket(ctx context.Context, name string) error {
 
 	delete(db.buckets, name)
 
+	return nil
+}
+
+// ForceDeleteBucket removes a bucket and its contents.
+func (db *Backend) ForceDeleteBucket(_ context.Context, name string) error {
+	db.lock.Lock()
+	defer db.lock.Unlock()
+
+	if db.buckets[name] == nil {
+		return gofakes3.ErrNoSuchBucket
+	}
+	delete(db.buckets, name)
 	return nil
 }
 
@@ -234,6 +248,17 @@ func (db *Backend) PutObject(ctx context.Context, bucketName, objectName string,
 	bucket := db.buckets[bucketName]
 	if bucket == nil {
 		return result, gofakes3.BucketNotFound(bucketName)
+	}
+
+	if gofakes3.HasWriteConditions(ctx) {
+		stored := bucket.object(objectName)
+		exists, etag := false, ""
+		if stored != nil && stored.data != nil && !stored.data.deleteMarker {
+			exists, etag = true, stored.data.etag
+		}
+		if err := gofakes3.CheckWriteConditions(ctx, exists, etag); err != nil {
+			return result, err
+		}
 	}
 
 	hash := md5.Sum(bts)

@@ -2,6 +2,7 @@ package gofakes3
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -70,6 +71,23 @@ func WithRequestID(id uint64) Option {
 // for details.
 func WithHostBucket(enabled bool) Option {
 	return func(g *GoFakeS3) { g.hostBucket = enabled }
+}
+
+// WithHostBucketBase enables virtual-host bucket routing for subdomains of the
+// supplied hosts. Other hosts use path-style routing.
+func WithHostBucketBase(hosts ...string) Option {
+	bases := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		if base := strings.Trim(host, "."); base != "" {
+			bases = append(bases, base)
+		}
+	}
+	return func(g *GoFakeS3) { g.hostBucketBases = bases }
+}
+
+// WithInsecureCORS allows all methods and headers in CORS preflight responses.
+func WithInsecureCORS() Option {
+	return func(g *GoFakeS3) { g.insecureCORS = true }
 }
 
 // WithoutVersioning disables versioning on the passed backend, if it supported it.
